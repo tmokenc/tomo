@@ -1,0 +1,26 @@
+[package]
+name = "tomo-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = ["fjall-backend"]
+fjall-backend = ["dep:fjall"]
+
+[dependencies]
+tomo-core = { workspace = true }
+
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+bytes       = { workspace = true }
+flume       = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+
+# Backends (gated by feature)
+fjall = { workspace = true, optional = true }

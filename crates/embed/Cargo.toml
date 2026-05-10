@@ -1,0 +1,14 @@
+[package]
+name = "tomo-embed"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+twilight-model = { workspace = true }
+twilight-util  = { workspace = true }
+twilight-validate = { workspace = true }
+chrono   = { workspace = true }
+url      = { workspace = true }

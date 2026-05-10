@@ -1,0 +1,102 @@
+syntax = "proto3";
+
+package tomo.v1;
+
+// Internal control-plane API the Discord bot exposes for sibling services
+// (admin web UI, future automation, etc.) to talk to it.
+service TomoControl {
+    rpc GetStatus       (Empty)              returns (BotStatus);
+    rpc GetGlobalStats  (Empty)              returns (GlobalStats);
+    rpc GetUserStats    (UserStatsRequest)   returns (UserStats);
+    rpc GetGuildStats   (GuildStatsRequest)  returns (GuildStats);
+    rpc GetTopCommands  (TopCommandsRequest) returns (TopCommandsResponse);
+    rpc ListCommands    (Empty)              returns (CommandList);
+    rpc ListTriggers    (Empty)              returns (TriggerList);
+
+    // Privileged endpoints — the server enforces an owner check.
+    rpc ReloadScripts   (ReloadRequest)      returns (ReloadResult);
+    rpc CheckOwnership  (CheckOwnerRequest)  returns (CheckOwnerResponse);
+}
+
+message Empty {}
+
+message BotStatus {
+    string          name             = 1;
+    string          version          = 2;
+    int64           started_at_unix  = 3;
+    int64           uptime_seconds   = 4;
+    repeated uint64 owners           = 5;
+    uint64          bot_user_id      = 6;
+    bool            gemini_enabled   = 7;
+
+    // Identity fetched from Discord on startup.
+    uint32 discriminator            = 8;
+    string avatar_url               = 9;
+    uint64 application_id           = 10;
+    string application_name         = 11;
+    string application_description  = 12;
+    bool   bot_public               = 13;
+    bool   bot_require_code_grant   = 14;
+    bool   verified                 = 15;
+    uint64 owner_id                 = 16;
+    string owner_username           = 17;
+}
+
+message GlobalStats {
+    uint64 messages      = 1;
+    uint64 commands      = 2;
+    uint64 gemini_calls  = 3;
+    uint64 gemini_tokens = 4;
+}
+
+message UserStatsRequest { uint64 user_id = 1; }
+message UserStats {
+    uint64 user_id       = 1;
+    uint64 messages      = 2;
+    uint64 commands      = 3;
+    uint64 gemini_calls  = 4;
+    uint64 gemini_tokens = 5;
+}
+
+message GuildStatsRequest { uint64 guild_id = 1; }
+message GuildStats {
+    uint64 guild_id = 1;
+    uint64 messages = 2;
+    uint64 commands = 3;
+}
+
+message TopCommandsRequest { uint32 limit = 1; }
+message CommandUsage       { string command = 1; uint64 count = 2; }
+message TopCommandsResponse{ repeated CommandUsage commands = 1; }
+
+message CommandInfo {
+    string          name        = 1;
+    string          description = 2;
+    repeated string aliases     = 3;
+    string          category    = 4;
+    bool            slash       = 5;
+    bool            prefix      = 6;
+    bool            guild_only  = 7;
+    bool            owner_only  = 8;
+    bool            is_script   = 9;
+}
+message CommandList { repeated CommandInfo commands = 1; }
+
+message TriggerInfo {
+    string name         = 1;
+    string matcher_kind = 2;
+    string matcher_arg  = 3;
+    bool   is_script    = 4;
+}
+message TriggerList { repeated TriggerInfo triggers = 1; }
+
+message ReloadRequest { uint64 requester_id = 1; }
+message ReloadResult {
+    bool   success       = 1;
+    string message       = 2;
+    uint32 command_count = 3;
+    uint32 trigger_count = 4;
+}
+
+message CheckOwnerRequest  { uint64 user_id = 1; }
+message CheckOwnerResponse { bool   is_owner = 1; }

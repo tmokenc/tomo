@@ -1,0 +1,119 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/db",
+    "crates/embed",
+    "crates/pagination",
+    "crates/stats",
+    "crates/gemini",
+    "crates/requester",
+    "crates/scripting",
+    "crates/rpc",
+    "crates/discord",
+    "crates/admin",
+    "crates/tomo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+authors = ["tmokenc <nguyenleduy12610@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/tmokenc/tomo"
+
+[workspace.dependencies]
+# Internal crates
+tomo-core       = { path = "crates/core" }
+tomo-db         = { path = "crates/db" }
+tomo-embed      = { path = "crates/embed" }
+tomo-pagination = { path = "crates/pagination" }
+tomo-stats      = { path = "crates/stats" }
+tomo-gemini     = { path = "crates/gemini" }
+tomo-scripting  = { path = "crates/scripting" }
+tomo-requester  = { path = "crates/requester" }
+tomo-rpc        = { path = "crates/rpc" }
+tomo-discord    = { path = "crates/discord" }
+tomo-admin      = { path = "crates/admin" }
+
+# Twilight (Discord)
+twilight-gateway        = { version = "0.17", default-features = false, features = ["rustls-platform-verifier", "twilight-http"] }
+twilight-http           = { version = "0.17", default-features = false, features = ["rustls-platform-verifier", "decompression"] }
+twilight-model          = "0.17"
+twilight-cache-inmemory = { version = "0.17", features = ["permission-calculator"] }
+twilight-standby        = "0.17"
+twilight-util           = { version = "0.17", features = ["builder", "snowflake", "permission-calculator"] }
+twilight-validate       = "0.17"
+
+# Async runtime / networking
+tokio   = { version = "1.47", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "fs", "io-util"] }
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "gzip", "http2"] }
+
+# Database (embedded LSM-tree KV store)
+fjall = "3"
+
+# Scripting
+rhai = { version = "1.24", features = ["sync", "serde", "decimal", "metadata"] }
+notify = "8"
+
+# Error handling / utility
+anyhow      = "1"
+thiserror   = "2"
+async-trait = "0.1"
+arc-swap    = "1"
+dashmap     = "6"
+flume       = "0.12"
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+toml        = "1"
+
+# Logging
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# Time / regex / misc
+regex     = "1"
+chrono    = { version = "0.4", features = ["serde"] }
+humantime = "2"
+rand      = "0.10"
+url       = "2"
+bytes     = "1"
+sha2      = "0.10"
+chrono-tz = "0.10"
+qrcode    = { version = "0.14", default-features = false, features = ["image"] }
+image     = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+rqrr      = "0.10"
+ocr-rs    = "2"
+scraper   = "0.26"
+
+# gRPC
+tonic        = { version = "0.14", default-features = false, features = ["server", "channel", "transport", "codegen", "router"] }
+tonic-prost       = "0.14"
+tonic-prost-build = "0.14"
+prost             = "0.14"
+prost-types       = "0.14"
+
+# Admin web service
+axum         = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "macros", "tokio", "query"] }
+axum-extra   = { version = "0.12", default-features = false, features = ["cookie", "cookie-signed"] }
+tower        = { version = "0.5", default-features = false }
+tower-http   = { version = "0.6", default-features = false, features = ["trace", "cors", "fs"] }
+oauth2       = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+
+# Config
+dotenvy = "0.15"
+
+[profile.release]
+lto         = "thin"
+codegen-units = 1
+strip       = "debuginfo"
+opt-level   = 3
+panic       = "abort"
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 2

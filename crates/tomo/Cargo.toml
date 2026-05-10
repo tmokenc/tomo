@@ -1,0 +1,22 @@
+[package]
+name = "tomo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tomo"
+path = "src/main.rs"
+
+[dependencies]
+tomo-core    = { workspace = true }
+tomo-db      = { workspace = true }
+tomo-discord = { workspace = true }
+tomo-admin   = { workspace = true }
+
+anyhow             = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "tomo-stats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tomo-core = { workspace = true }
+tomo-db   = { workspace = true }
+
+bytes          = { workspace = true }
+flume          = { workspace = true }
+serde          = { workspace = true }
+tokio          = { workspace = true }
+tracing        = { workspace = true }
+twilight-model = { workspace = true }

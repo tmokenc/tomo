@@ -1,0 +1,208 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+use twilight_model::application::interaction::application_command::CommandData;
+use twilight_model::application::interaction::Interaction;
+use twilight_model::channel::Message;
+use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
+use twilight_model::id::Id;
+use twilight_model::id::marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker};
+use twilight_util::builder::InteractionResponseDataBuilder;
+
+use tomo_core::error::{Error, Result};
+use tomo_embed::Embedable;
+
+use crate::state::Bot;
+
+/// How a command was invoked.
+pub enum InvocationSource {
+    Prefix {
+        msg: Box<Message>,
+        /// Arguments after the command name (already trimmed).
+        args: String,
+    },
+    Slash {
+        interaction: Box<Interaction>,
+        data: Box<CommandData>,
+    },
+}
+
+pub struct CommandContext {
+    pub bot: Bot,
+    pub source: InvocationSource,
+    pub started_at: Instant,
+    /// Set after the first response is sent. Used by helpers like [`reply`] to
+    /// switch between create-response and create-followup for slash commands.
+    responded: AtomicBool,
+}
+
+impl CommandContext {
+    pub fn new(bot: Bot, source: InvocationSource) -> Self {
+        Self {
+            bot,
+            source,
+            started_at: Instant::now(),
+            responded: AtomicBool::new(false),
+        }
+    }
+
+    fn take_responded(&self) -> bool {
+        self.responded.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn channel_id(&self) -> Id<ChannelMarker> {
+        match &self.source {
+            InvocationSource::Prefix { msg, .. } => msg.channel_id,
+            InvocationSource::Slash { interaction, .. } => {
+                interaction.channel.as_ref().map(|c| c.id).unwrap_or(Id::new(1))
+            }
+        }
+    }
+
+    pub fn guild_id(&self) -> Option<Id<GuildMarker>> {
+        match &self.source {
+            InvocationSource::Prefix { msg, .. } => msg.guild_id,
+            InvocationSource::Slash { interaction, .. } => interaction.guild_id,
+        }
+    }
+
+    pub fn author_id(&self) -> Id<UserMarker> {
+        match &self.source {
+            InvocationSource::Prefix { msg, .. } => msg.author.id,
+            InvocationSource::Slash { interaction, .. } => interaction
+                .author_id()
+                .unwrap_or(Id::new(1)),
+        }
+    }
+
+    pub fn message_id(&self) -> Option<Id<MessageMarker>> {
+        match &self.source {
+            InvocationSource::Prefix { msg, .. } => Some(msg.id),
+            InvocationSource::Slash { interaction, .. } => interaction
+                .message
+                .as_ref()
+                .map(|m| m.id),
+        }
+    }
+
+    pub fn args(&self) -> &str {
+        match &self.source {
+            InvocationSource::Prefix { args, .. } => args.as_str(),
+            InvocationSource::Slash { .. } => "",
+        }
+    }
+
+    pub fn is_slash(&self) -> bool {
+        matches!(self.source, InvocationSource::Slash { .. })
+    }
+
+    /// Send a plain text response.
+    pub async fn reply(&self, content: &str) -> Result<()> {
+        match &self.source {
+            InvocationSource::Prefix { msg, .. } => {
+                self.bot
+                    .http
+                    .create_message(msg.channel_id)
+                    .content(content)
+                    .reply(msg.id)
+                    .await
+                    .map_err(|e| Error::config(format!("send: {e}")))?;
+                Ok(())
+            }
+            InvocationSource::Slash { interaction, .. } => {
+                self.respond_text(interaction, content).await
+            }
+        }
+    }
+
+    /// Send an embed response.
+    pub async fn reply_embed(&self, embed: &impl Embedable) -> Result<()> {
+        let embed = embed.build_embed();
+        match &self.source {
+            InvocationSource::Prefix { msg, .. } => {
+                self.bot
+                    .http
+                    .create_message(msg.channel_id)
+                    .embeds(std::slice::from_ref(&embed))
+                    .reply(msg.id)
+                    .await
+                    .map_err(|e| Error::config(format!("send: {e}")))?;
+                Ok(())
+            }
+            InvocationSource::Slash { interaction, .. } => {
+                self.respond_embed(interaction, embed).await
+            }
+        }
+    }
+
+    async fn respond_text(&self, interaction: &Interaction, content: &str) -> Result<()> {
+        if self.take_responded() {
+            // Follow up.
+            let client = self.bot.http.interaction(interaction.application_id);
+            client
+                .create_followup(&interaction.token)
+                .content(content)
+                .await
+                .map_err(|e| Error::config(format!("followup: {e}")))?;
+            return Ok(());
+        }
+        let data = InteractionResponseDataBuilder::new()
+            .content(content.to_string())
+            .build();
+        let response = InteractionResponse {
+            kind: InteractionResponseType::ChannelMessageWithSource,
+            data: Some(data),
+        };
+        let client = self.bot.http.interaction(interaction.application_id);
+        client
+            .create_response(interaction.id, &interaction.token, &response)
+            .await
+            .map_err(|e| Error::config(format!("respond: {e}")))?;
+        Ok(())
+    }
+
+    async fn respond_embed(
+        &self,
+        interaction: &Interaction,
+        embed: twilight_model::channel::message::Embed,
+    ) -> Result<()> {
+        if self.take_responded() {
+            let client = self.bot.http.interaction(interaction.application_id);
+            client
+                .create_followup(&interaction.token)
+                .embeds(std::slice::from_ref(&embed))
+                .await
+                .map_err(|e| Error::config(format!("followup: {e}")))?;
+            return Ok(());
+        }
+        let data = InteractionResponseDataBuilder::new()
+            .embeds([embed])
+            .build();
+        let response = InteractionResponse {
+            kind: InteractionResponseType::ChannelMessageWithSource,
+            data: Some(data),
+        };
+        let client = self.bot.http.interaction(interaction.application_id);
+        client
+            .create_response(interaction.id, &interaction.token, &response)
+            .await
+            .map_err(|e| Error::config(format!("respond: {e}")))?;
+        Ok(())
+    }
+
+    /// Defer a slash command response — useful when the command does slow work.
+    pub async fn defer(&self) -> Result<()> {
+        let InvocationSource::Slash { interaction, .. } = &self.source else { return Ok(()); };
+        let response = InteractionResponse {
+            kind: InteractionResponseType::DeferredChannelMessageWithSource,
+            data: None,
+        };
+        let client = self.bot.http.interaction(interaction.application_id);
+        client
+            .create_response(interaction.id, &interaction.token, &response)
+            .await
+            .map_err(|e| Error::config(format!("defer: {e}")))?;
+        self.responded.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}

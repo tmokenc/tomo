@@ -1,0 +1,21 @@
+[package]
+name = "tomo-rpc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# Generated code + thin auth helpers used by both server and client.
+
+[dependencies]
+prost       = { workspace = true }
+prost-types = { workspace = true }
+tonic       = { workspace = true }
+tonic-prost = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+http        = "1"
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

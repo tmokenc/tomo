@@ -1,0 +1,54 @@
+[package]
+name = "tomo-discord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tomo-core       = { workspace = true }
+tomo-db         = { workspace = true }
+tomo-embed      = { workspace = true }
+tomo-pagination = { workspace = true }
+tomo-stats      = { workspace = true }
+tomo-gemini     = { workspace = true }
+tomo-scripting  = { workspace = true }
+tomo-requester  = { workspace = true }
+tomo-rpc        = { workspace = true }
+
+# gRPC
+tonic = { workspace = true }
+
+# Twilight (Discord)
+twilight-cache-inmemory = { workspace = true }
+twilight-gateway        = { workspace = true }
+twilight-http           = { workspace = true }
+twilight-model          = { workspace = true }
+twilight-standby        = { workspace = true }
+twilight-util           = { workspace = true }
+
+# Image / QR / OCR
+image  = { workspace = true }
+qrcode = { workspace = true }
+rqrr   = { workspace = true }
+ocr-rs = { workspace = true }
+
+# Time zones, RNG
+chrono-tz = { workspace = true }
+rand      = { workspace = true }
+
+# Async / utility
+arc-swap    = { workspace = true }
+async-trait = { workspace = true }
+bytes       = { workspace = true }
+chrono      = { workspace = true }
+flume       = { workspace = true }
+futures     = { workspace = true }
+humantime   = { workspace = true }
+notify      = { workspace = true }
+regex       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }

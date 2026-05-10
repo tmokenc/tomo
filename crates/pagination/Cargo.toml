@@ -1,0 +1,20 @@
+[package]
+name = "tomo-pagination"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tomo-core  = { workspace = true }
+tomo-embed = { workspace = true }
+
+async-trait = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+twilight-model = { workspace = true }
+twilight-http  = { workspace = true }
+twilight-standby = { workspace = true }
+twilight-util  = { workspace = true }
+futures        = { workspace = true }

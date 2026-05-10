@@ -1,0 +1,23 @@
+[package]
+name = "tomo-scripting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tomo-core  = { workspace = true }
+tomo-embed = { workspace = true }
+
+arc-swap  = { workspace = true }
+chrono    = { workspace = true }
+chrono-tz = { workspace = true }
+flume     = { workspace = true }
+humantime = { workspace = true }
+notify    = { workspace = true }
+regex     = { workspace = true }
+rhai      = { workspace = true }
+serde     = { workspace = true }
+tokio     = { workspace = true }
+tracing   = { workspace = true }

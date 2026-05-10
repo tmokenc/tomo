@@ -1,0 +1,25 @@
+[build]
+target = "index.html"
+dist   = "dist"
+
+# When developing, point your browser at http://127.0.0.1:8081/ and the dev
+# server will proxy /api/* and /login/* to the admin backend at 8080.
+[serve]
+address = "127.0.0.1"
+port    = 8081
+
+[[proxy]]
+backend = "http://127.0.0.1:8080/api/"
+rewrite = "/api/"
+
+[[proxy]]
+backend = "http://127.0.0.1:8080/login"
+rewrite = "/login"
+
+[[proxy]]
+backend = "http://127.0.0.1:8080/logout"
+rewrite = "/logout"
+
+[[proxy]]
+backend = "http://127.0.0.1:8080/oauth/"
+rewrite = "/oauth/"

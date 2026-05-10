@@ -1,0 +1,10 @@
+/target
+/.env
+/data/
+*.db
+*.db-shm
+*.db-wal
+/.idea/
+/.vscode/
+/.claude/
+/frontend/dist/
