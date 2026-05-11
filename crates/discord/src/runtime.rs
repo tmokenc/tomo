@@ -9,7 +9,7 @@ use chrono::Utc;
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
-use twilight_cache_inmemory::{DefaultInMemoryCache, ResourceType};
+use tomo_cache::{PersistentCache, ResourceType};
 use twilight_gateway::{Config as GatewayConfig, Event, Shard, StreamExt as _};
 use twilight_http::Client;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
@@ -60,7 +60,7 @@ impl DiscordService {
         }
 
         let cache = Arc::new(
-            DefaultInMemoryCache::builder()
+            PersistentCache::builder(Arc::clone(&db))
                 .resource_types(
                     ResourceType::CHANNEL
                         | ResourceType::GUILD
@@ -71,7 +71,9 @@ impl DiscordService {
                         | ResourceType::USER_CURRENT,
                 )
                 .message_cache_size(200)
-                .build(),
+                .build()
+                .await
+                .map_err(|e| tomo_core::Error::config(format!("cache build: {e}")))?,
         );
 
         let standby = Arc::new(Standby::new());
@@ -81,7 +83,7 @@ impl DiscordService {
             warn!(error = %e, "initial script load");
         }
 
-        let gemini = build_gemini(&config);
+        let gemini = build_gemini(&config).await;
         let requester = tomo_requester::Requester::new()
             .map_err(|e| tomo_core::Error::config(format!("requester: {e}")))?;
         let ocr = build_ocr(&config);
@@ -147,7 +149,13 @@ impl DiscordService {
             owners = bot.owners.len(),
             commands = bot.commands.load().iter_unique().count(),
             triggers = bot.triggers.load().iter_builtin().count() + bot.triggers.load().iter_script().count(),
+            gemini = bot.gemini.is_some(),
             "bot ready"
+        );
+        info!(
+            user_id = %id.user_id,
+            "tip: gemini mention triggers on `<@{}>` (or a reply to the bot)",
+            id.user_id
         );
         if let Some(owner) = id.owner.as_ref() {
             info!(owner_id = %owner.id, owner = %owner.username, "application owner");
@@ -309,15 +317,45 @@ async fn on_interaction(bot: Bot, ev: InteractionCreate) {
         return;
     };
 
+    let args = flatten_options(&cmd_data.options);
     run_command(
         bot,
         cmd,
         InvocationSource::Slash {
             interaction: Box::new(interaction),
             data: Box::new(*cmd_data),
+            args,
         },
     )
     .await;
+}
+
+/// Concatenate the leaf values of a slash command's options into a single
+/// whitespace-separated string. Command implementations parse this the same
+/// way they parse `args` from a prefix invocation, so option declarations
+/// give users hints without forcing a parser rewrite on every command.
+fn flatten_options(
+    options: &[twilight_model::application::interaction::application_command::CommandDataOption],
+) -> String {
+    use twilight_model::application::interaction::application_command::CommandOptionValue;
+    let mut parts = Vec::new();
+    for opt in options {
+        match &opt.value {
+            CommandOptionValue::String(s) if !s.is_empty() => parts.push(s.clone()),
+            CommandOptionValue::Integer(n) => parts.push(n.to_string()),
+            CommandOptionValue::Number(n) => parts.push(n.to_string()),
+            CommandOptionValue::Boolean(b) => parts.push(b.to_string()),
+            CommandOptionValue::User(id) => parts.push(format!("<@{id}>")),
+            CommandOptionValue::Channel(id) => parts.push(format!("<#{id}>")),
+            CommandOptionValue::Role(id) => parts.push(format!("<@&{id}>")),
+            CommandOptionValue::SubCommand(sub) | CommandOptionValue::SubCommandGroup(sub) => {
+                parts.push(opt.name.clone());
+                parts.push(flatten_options(sub));
+            }
+            _ => {}
+        }
+    }
+    parts.join(" ")
 }
 
 async fn run_command(bot: Bot, cmd: DynCommand, source: InvocationSource) {
@@ -470,20 +508,62 @@ fn build_ocr(config: &Config) -> Vec<crate::state::OcrSlot> {
     out
 }
 
-fn build_gemini(config: &Config) -> Option<GeminiContext> {
-    let cfg = config.gemini.clone()?;
+async fn build_gemini(config: &Config) -> Option<GeminiContext> {
+    let Some(cfg) = config.gemini.clone() else {
+        // tomo-core already logged the precise reason (`TOMO_ENABLE_GEMINI`
+        // off, key missing, or key empty) when it parsed the env. Nothing
+        // useful to add here; just confirm the state at the discord layer.
+        info!("gemini: disabled (see tomo-core config logs above for the reason)");
+        return None;
+    };
+    if cfg.api_key.trim().is_empty() {
+        warn!("gemini: disabled — `GEMINI_API_KEY` is empty");
+        return None;
+    }
+    let models = cfg.models.clone();
     let rate_limit = Arc::new(RateLimiter::per_minute(cfg.rate_limit_per_minute));
     let conversations = Arc::new(ConversationStore::new(cfg.context_messages.max(2)));
-    match GeminiClient::new(cfg) {
-        Ok(client) => Some(GeminiContext {
-            client: Arc::new(client),
-            conversations,
-            rate_limit,
-        }),
+    let client = match GeminiClient::new(cfg) {
+        Ok(c) => Arc::new(c),
         Err(e) => {
-            warn!(error = ?e, "gemini disabled");
-            None
+            warn!(error = ?e, "gemini: client build failed — disabled");
+            return None;
+        }
+    };
+
+    info!(chain = ?models, "gemini: fallback chain configured");
+
+    // Pre-flight: ask Google for the primary model's metadata. This catches
+    // the most common misconfigurations (typo'd model name, bad/expired API
+    // key, no network) at startup instead of surfacing them as silent
+    // non-responses the first time a user mentions the bot.
+    match client.health_check().await {
+        Ok(info) => {
+            info!(
+                model = %info.name,
+                display_name = %info.display_name,
+                input_token_limit = info.input_token_limit,
+                output_token_limit = info.output_token_limit,
+                "gemini: connection OK (primary model)"
+            );
+        }
+        Err(e) => {
+            warn!(
+                primary = %models.first().map(String::as_str).unwrap_or(""),
+                error = ?e,
+                "gemini: health check FAILED on primary model. Mentions will still try the chain, \
+                 but check `GEMINI_API_KEY` and `GEMINI_MODEL` if every model 404s/401s."
+            );
+            // The client is still returned: a transient outage shouldn't
+            // permanently disable the feature, and the next mention will
+            // retry. The startup log makes the failure auditable.
         }
     }
+
+    Some(GeminiContext {
+        client,
+        conversations,
+        rate_limit,
+    })
 }
 

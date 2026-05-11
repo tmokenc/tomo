@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/db",
+    "crates/cache",
     "crates/embed",
     "crates/pagination",
     "crates/stats",
@@ -27,6 +28,7 @@ repository = "https://github.com/tmokenc/tomo"
 # Internal crates
 tomo-core       = { path = "crates/core" }
 tomo-db         = { path = "crates/db" }
+tomo-cache      = { path = "crates/cache" }
 tomo-embed      = { path = "crates/embed" }
 tomo-pagination = { path = "crates/pagination" }
 tomo-stats      = { path = "crates/stats" }
@@ -37,11 +39,11 @@ tomo-rpc        = { path = "crates/rpc" }
 tomo-discord    = { path = "crates/discord" }
 tomo-admin      = { path = "crates/admin" }
 
-# Twilight (Discord)
+# Twilight (Discord). Cache provided by the local `tomo-cache` crate, so the
+# `twilight-cache-inmemory` dependency is intentionally absent.
 twilight-gateway        = { version = "0.17", default-features = false, features = ["rustls-platform-verifier", "twilight-http"] }
 twilight-http           = { version = "0.17", default-features = false, features = ["rustls-platform-verifier", "decompression"] }
 twilight-model          = "0.17"
-twilight-cache-inmemory = { version = "0.17", features = ["permission-calculator"] }
 twilight-standby        = "0.17"
 twilight-util           = { version = "0.17", features = ["builder", "snowflake", "permission-calculator"] }
 twilight-validate       = "0.17"
@@ -80,13 +82,14 @@ humantime = "2"
 rand      = "0.10"
 url       = "2"
 bytes     = "1"
-sha2      = "0.10"
+sha2      = "0.11"
 chrono-tz = "0.10"
 qrcode    = { version = "0.14", default-features = false, features = ["image"] }
 image     = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 rqrr      = "0.10"
 ocr-rs    = "2"
 scraper   = "0.26"
+bitflags  = { version = "2", features = ["serde"] }
 
 # gRPC
 tonic        = { version = "0.14", default-features = false, features = ["server", "channel", "transport", "codegen", "router"] }

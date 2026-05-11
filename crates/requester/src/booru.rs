@@ -37,6 +37,16 @@ impl BooruSource {
         }
     }
 
+    /// URL of a specific post on the source site — used as the `url` of
+    /// embeds linking back to the original posting.
+    pub fn post_url(self, id: u64) -> String {
+        match self {
+            Self::Yandere => format!("https://yande.re/post/show/{id}"),
+            Self::Konachan => format!("https://konachan.com/post/show/{id}"),
+            Self::Danbooru => format!("https://danbooru.donmai.us/posts/{id}"),
+        }
+    }
+
     fn list_url(self) -> &'static str {
         match self {
             Self::Yandere => "https://yande.re/post.json",
@@ -59,6 +69,14 @@ impl BooruRating {
             'e' => Self::Explicit,
             'q' => Self::Questionable,
             _ => Self::Safe,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Safe => "safe",
+            Self::Questionable => "questionable",
+            Self::Explicit => "explicit",
         }
     }
 }

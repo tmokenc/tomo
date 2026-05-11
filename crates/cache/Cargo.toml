@@ -1,0 +1,37 @@
+[package]
+name = "tomo-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+# A `twilight-cache-inmemory`-compatible cache backed by `tomo-db`. State is
+# held in concurrent maps for sync access, and every mutation is shipped to a
+# background writer task that persists it to fjall.
+
+[dependencies]
+tomo-core = { workspace = true }
+tomo-db   = { workspace = true }
+
+arc-swap   = { workspace = true }
+async-trait = { workspace = true }
+bitflags   = { workspace = true }
+bytes      = { workspace = true }
+dashmap    = { workspace = true }
+flume      = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+
+twilight-gateway = { workspace = true }
+twilight-model   = { workspace = true }
+twilight-util    = { workspace = true, optional = true }
+
+[features]
+default = []
+# Opt-in `PersistentCache::permissions()`. Mirrors twilight-cache-inmemory's
+# `permission-calculator` feature: pulls in twilight-util's `PermissionCalculator`.
+permission-calculator = ["dep:twilight-util"]

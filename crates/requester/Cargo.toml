@@ -13,6 +13,7 @@ license.workspace = true
 
 [dependencies]
 chrono     = { workspace = true }
+regex      = { workspace = true }
 reqwest    = { workspace = true }
 scraper    = { workspace = true }
 serde      = { workspace = true }

@@ -1,5 +1,5 @@
 use regex::Regex;
-use rhai::{Dynamic, Map};
+use rhai::Map;
 
 use tomo_core::error::{Error, Result};
 
@@ -57,28 +57,80 @@ impl TriggerMatcher {
     /// match: #{ mentions_bot: true }
     /// ```
     pub fn from_meta(meta: &Map) -> Result<Self> {
-        if let Some(re) = meta.get("regex").and_then(Dynamic::read_lock::<String>) {
+        // Rhai stores strings as `ImmutableString`, so `read_lock::<String>`
+        // returns `None` for string-valued keys here. `try_cast::<String>`
+        // handles the conversion — same fix as `loader::meta_string`.
+        if let Some(re) = get_string(meta, "regex") {
             return Regex::new(&re)
                 .map(Self::Regex)
                 .map_err(|e| Error::script(format!("invalid regex: {e}")));
         }
-        if meta.get("has_image").map(Dynamic::as_bool).and_then(Result::ok).unwrap_or(false) {
+        if get_bool(meta, "has_image") {
             return Ok(Self::HasImage);
         }
-        if meta.get("has_attachment").map(Dynamic::as_bool).and_then(Result::ok).unwrap_or(false) {
+        if get_bool(meta, "has_attachment") {
             return Ok(Self::HasAttachment);
         }
-        if let Some(s) = meta.get("contains").and_then(Dynamic::read_lock::<String>) {
-            return Ok(Self::Contains(s.clone()));
+        if let Some(s) = get_string(meta, "contains") {
+            return Ok(Self::Contains(s));
         }
-        if let Some(s) = meta.get("starts_with").and_then(Dynamic::read_lock::<String>) {
-            return Ok(Self::StartsWith(s.clone()));
+        if let Some(s) = get_string(meta, "starts_with") {
+            return Ok(Self::StartsWith(s));
         }
-        if meta.get("mentions_bot").map(Dynamic::as_bool).and_then(Result::ok).unwrap_or(false) {
+        if get_bool(meta, "mentions_bot") {
             return Ok(Self::MentionsBot);
         }
         Err(Error::script(
             "trigger meta needs a `match` map with one of: regex, has_image, has_attachment, contains, starts_with, mentions_bot",
         ))
+    }
+}
+
+fn get_string(meta: &Map, key: &str) -> Option<String> {
+    meta.get(key).and_then(|v| v.clone().try_cast::<String>())
+}
+
+fn get_bool(meta: &Map, key: &str) -> bool {
+    meta.get(key).and_then(|v| v.as_bool().ok()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TriggerMatcher;
+    use rhai::{Engine, Map, Scope};
+
+    fn meta_for(source: &str) -> Map {
+        let engine = Engine::new();
+        let ast = engine.compile(source).expect("compile");
+        let mut scope = Scope::new();
+        engine
+            .call_fn::<Map>(&mut scope, &ast, "meta", ())
+            .expect("meta() call")
+            .get("match")
+            .expect("`match` key present")
+            .clone()
+            .try_cast::<Map>()
+            .expect("`match` is a map")
+    }
+
+    #[test]
+    fn parses_regex_matcher() {
+        let m = meta_for(r#"fn meta() { #{ "match": #{ regex: "\\bmeow\\b" } } }"#);
+        let matcher = TriggerMatcher::from_meta(&m).expect("regex matcher");
+        assert!(matches!(matcher, TriggerMatcher::Regex(_)));
+    }
+
+    #[test]
+    fn parses_has_image_matcher() {
+        let m = meta_for(r#"fn meta() { #{ "match": #{ has_image: true } } }"#);
+        let matcher = TriggerMatcher::from_meta(&m).expect("has_image matcher");
+        assert!(matches!(matcher, TriggerMatcher::HasImage));
+    }
+
+    #[test]
+    fn parses_contains_matcher() {
+        let m = meta_for(r#"fn meta() { #{ "match": #{ contains: "kekw" } } }"#);
+        let matcher = TriggerMatcher::from_meta(&m).expect("contains matcher");
+        assert!(matches!(matcher, TriggerMatcher::Contains(ref s) if s == "kekw"));
     }
 }

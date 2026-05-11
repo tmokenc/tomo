@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 tomo-core       = { workspace = true }
 tomo-db         = { workspace = true }
+tomo-cache      = { workspace = true, features = ["permission-calculator"] }
 tomo-embed      = { workspace = true }
 tomo-pagination = { workspace = true }
 tomo-stats      = { workspace = true }
@@ -21,7 +22,6 @@ tomo-rpc        = { workspace = true }
 tonic = { workspace = true }
 
 # Twilight (Discord)
-twilight-cache-inmemory = { workspace = true }
 twilight-gateway        = { workspace = true }
 twilight-http           = { workspace = true }
 twilight-model          = { workspace = true }

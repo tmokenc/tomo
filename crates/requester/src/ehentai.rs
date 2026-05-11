@@ -81,24 +81,29 @@ impl Requester {
     }
 }
 
-/// Extract `(gid, token)` pairs from a free-form string — picks up
-/// `https://e-hentai.org/g/<gid>/<token>/` (and `exhentai.org` variants).
+/// Extract `(gid, token)` pairs from a free-form string. Matches both the
+/// fully-qualified URL forms (`https://e-hentai.org/g/<gid>/<token>/`,
+/// `exhentai.org`) and the bare path form `g/<gid>/<token>/`. Duplicates
+/// are removed.
 pub fn parse_ids(input: &str) -> Vec<EhentaiId> {
-    let mut out = Vec::new();
-    for marker in ["e-hentai.org/g/", "exhentai.org/g/"] {
-        let mut search = input;
-        while let Some(idx) = search.find(marker) {
-            let after = &search[idx + marker.len()..];
-            let mut parts = after.splitn(3, '/');
-            let gid_str = parts.next().unwrap_or("");
-            let token = parts.next().unwrap_or("");
-            if let Ok(gid) = gid_str.parse::<u64>() {
-                if !token.is_empty() && token.chars().all(|c| c.is_ascii_hexdigit()) {
-                    out.push((gid, token.to_string()));
-                }
-            }
-            search = &after[gid_str.len()..];
-        }
-    }
+    use std::sync::LazyLock;
+    // `\bg/<digits>/<hex>` — word boundary on the left avoids matching
+    // unrelated `…rang/123/abc` strings; the token must be at least four
+    // hex chars (E-Hentai tokens are 10 by convention but we're lenient).
+    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\bg/(\d+)/([0-9a-fA-F]{4,40})\b")
+            .expect("static ehentai regex")
+    });
+
+    let mut out: Vec<EhentaiId> = RE
+        .captures_iter(input)
+        .filter_map(|caps| {
+            let gid = caps.get(1)?.as_str().parse::<u64>().ok()?;
+            let token = caps.get(2)?.as_str().to_ascii_lowercase();
+            Some((gid, token))
+        })
+        .collect();
+    out.sort();
+    out.dedup();
     out
 }

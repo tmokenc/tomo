@@ -11,6 +11,10 @@ pub struct ScriptCommand {
     pub name: String,
     pub description: String,
     pub aliases: Vec<String>,
+    /// Help-embed category override. When unset the adapter falls back to
+    /// the default category (currently "General"), so scripts blend into the
+    /// help listing alongside built-in commands.
+    pub category: Option<String>,
     pub slash: bool,
     pub prefix: bool,
     pub guild_only: bool,

@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::TimeZone;
 use chrono_tz::Tz;
-use rhai::{Engine, OptimizationLevel};
+use rhai::{Dynamic, Engine, OptimizationLevel};
 
 use crate::ctx::ScriptCtx;
 
@@ -21,14 +21,22 @@ pub fn make_engine() -> Engine {
     engine.build_type::<ScriptCtx>();
     engine.build_type::<crate::embed::ScriptEmbed>();
 
-    // Embed factory — scripts call `embed()` to obtain a fresh builder.
-    engine.register_fn("embed", crate::embed::ScriptEmbed::new);
+    // Embed factories — scripts call any of `embed()`, `embed_info()`,
+    // `embed_success()`, `embed_error()`, `embed_warning()`, `embed_lovely()`
+    // to get a fresh builder pre-coloured for the situation.
+    engine.register_fn("embed",         crate::embed::ScriptEmbed::new);
+    engine.register_fn("embed_info",    crate::embed::ScriptEmbed::info);
+    engine.register_fn("embed_success", crate::embed::ScriptEmbed::success);
+    engine.register_fn("embed_error",   crate::embed::ScriptEmbed::error);
+    engine.register_fn("embed_warning", crate::embed::ScriptEmbed::warning);
+    engine.register_fn("embed_lovely",  crate::embed::ScriptEmbed::lovely);
 
     // Theme colours.
     engine.register_fn("color_info",    || 0x9966ffi64);
     engine.register_fn("color_success", || 0x3cb371i64);
     engine.register_fn("color_error",   || 0xff0033i64);
     engine.register_fn("color_warning", || 0xffaa00i64);
+    engine.register_fn("color_lovely",  || 0xfc2368i64);
 
     // Time helpers.
     engine.register_fn("now_unix", || -> i64 {
@@ -58,6 +66,24 @@ pub fn make_engine() -> Engine {
             return "0s".to_string();
         }
         humantime::format_duration(Duration::from_secs(seconds as u64)).to_string()
+    });
+
+    // Safe parse helpers. Rhai's built-in `parse_int` / `parse_float` RAISE
+    // an error on bad input — the script aborts, the user sees nothing, the
+    // bot logs `execute(): Error parsing integer number '...': invalid digit`.
+    // These return `()` (unit) instead, so scripts can do
+    // `if let n = try_parse_int(x) { ... }` or compare against `()` directly.
+    engine.register_fn("try_parse_int", |s: &str| -> Dynamic {
+        match s.trim().parse::<i64>() {
+            Ok(n) => Dynamic::from_int(n),
+            Err(_) => Dynamic::UNIT,
+        }
+    });
+    engine.register_fn("try_parse_float", |s: &str| -> Dynamic {
+        match s.trim().parse::<f64>() {
+            Ok(n) => Dynamic::from_float(n),
+            Err(_) => Dynamic::UNIT,
+        }
     });
 
     // RNG.

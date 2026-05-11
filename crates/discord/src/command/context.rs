@@ -7,6 +7,7 @@ use twilight_model::channel::Message;
 use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
 use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker};
+use twilight_model::user::User;
 use twilight_util::builder::InteractionResponseDataBuilder;
 
 use tomo_core::error::{Error, Result};
@@ -24,6 +25,10 @@ pub enum InvocationSource {
     Slash {
         interaction: Box<Interaction>,
         data: Box<CommandData>,
+        /// Slash option values flattened into a single string (space-joined
+        /// in declared order), so command implementations don't need to
+        /// special-case slash vs. prefix.
+        args: String,
     },
 }
 
@@ -75,6 +80,35 @@ impl CommandContext {
         }
     }
 
+    /// The full [`User`] object for the invoking user. For prefix
+    /// invocations this is the message author; for slash invocations it's
+    /// the member or DM user attached to the interaction. Returns `None`
+    /// only for interactions that arrived without an attached user (which
+    /// in practice Discord doesn't send).
+    pub fn author(&self) -> Option<&User> {
+        match &self.source {
+            InvocationSource::Prefix { msg, .. } => Some(&msg.author),
+            InvocationSource::Slash { interaction, .. } => interaction
+                .member
+                .as_ref()
+                .and_then(|m| m.user.as_ref())
+                .or(interaction.user.as_ref()),
+        }
+    }
+
+    /// CDN URL for the invoking user's avatar at 256 px, or `None` if the
+    /// user has no custom avatar.
+    pub fn author_avatar_url(&self) -> Option<String> {
+        let user = self.author()?;
+        let hash = user.avatar.as_ref()?;
+        let hash_str = hash.to_string();
+        let ext = if hash_str.starts_with("a_") { "gif" } else { "png" };
+        Some(format!(
+            "https://cdn.discordapp.com/avatars/{}/{hash_str}.{ext}?size=256",
+            user.id
+        ))
+    }
+
     pub fn message_id(&self) -> Option<Id<MessageMarker>> {
         match &self.source {
             InvocationSource::Prefix { msg, .. } => Some(msg.id),
@@ -87,8 +121,9 @@ impl CommandContext {
 
     pub fn args(&self) -> &str {
         match &self.source {
-            InvocationSource::Prefix { args, .. } => args.as_str(),
-            InvocationSource::Slash { .. } => "",
+            InvocationSource::Prefix { args, .. } | InvocationSource::Slash { args, .. } => {
+                args.as_str()
+            }
         }
     }
 

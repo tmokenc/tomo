@@ -25,14 +25,31 @@ impl Command for HelpCommand {
         let snapshot = ctx.bot.commands.load();
         let mut groups: BTreeMap<&str, Vec<&CommandMeta>> = BTreeMap::new();
         for cmd in snapshot.iter_unique() {
-            groups.entry(cmd.meta().category).or_default().push(cmd.meta());
+            groups
+                .entry(cmd.meta().category.as_str())
+                .or_default()
+                .push(cmd.meta());
         }
+        let unique = snapshot.iter_unique().count();
 
-        let mut embed = Embed2::info().title("Tomo — Help").description(format!(
-            "Prefix `{}` or use slash commands. {} commands available.",
-            ctx.bot.config.discord.prefix,
-            snapshot.iter_unique().count()
-        ));
+        let id = &ctx.bot.identity;
+        let mut embed = Embed2::info()
+            .title(format!("{} — Help", id.username))
+            .description(format!(
+                "Prefix `{}` or use slash commands. **{unique}** commands across **{}** categories.",
+                ctx.bot.config.discord.prefix,
+                groups.len(),
+            ))
+            .author_with(id.full_username(), id.avatar_url.clone(), None::<String>)
+            .footer(format!(
+                "Tip: `{}<command>` runs a prefix command — slash works too.",
+                ctx.bot.config.discord.prefix,
+            ))
+            .timestamp_now();
+
+        if let Some(url) = id.avatar_url.as_ref() {
+            embed = embed.thumbnail(url.clone());
+        }
 
         for (category, mut metas) in groups {
             metas.sort_by(|a, b| a.name.cmp(&b.name));
@@ -49,7 +66,7 @@ impl Command for HelpCommand {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            embed = embed.field(category.to_string(), body, false);
+            embed = embed.field(format!("{category} ({})", metas.len()), body, false);
         }
         ctx.reply_embed(&embed).await
     }

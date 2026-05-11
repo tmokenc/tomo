@@ -12,6 +12,7 @@ use crate::command::Command;
 
 mod booru;
 mod ehentai;
+mod gemini;
 mod help;
 mod info;
 mod invite;
@@ -25,6 +26,7 @@ mod remind;
 mod stats;
 mod top;
 mod urban;
+mod vndb;
 
 fn boxed<T: Command + 'static>(c: T) -> Arc<dyn Command> {
     Arc::new(c)
@@ -45,6 +47,7 @@ pub fn all() -> Vec<Arc<dyn Command>> {
         boxed(booru::BooruCommand),
         boxed(nhentai::NhentaiCommand),
         boxed(ehentai::EhentaiCommand),
+        boxed(vndb::VndbCommand),
         // — Image —
         boxed(qr_code::QrCodeCommand),
         boxed(ocr::OcrCommand),
@@ -53,5 +56,6 @@ pub fn all() -> Vec<Arc<dyn Command>> {
         boxed(top::TopCommand),
         // — Admin —
         boxed(reload::ReloadCommand),
+        boxed(gemini::GeminiCommand),
     ]
 }

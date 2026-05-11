@@ -20,6 +20,17 @@ impl Command for PingCommand {
 
     async fn execute(&self, ctx: CommandContext) -> Result<()> {
         let latency = ctx.started_at.elapsed();
-        ctx.reply_embed(&Embed2::success().title("Pong!").description(format!("Round trip: `{:?}`", latency))).await
+        let mut embed = Embed2::success()
+            .title("Pong!")
+            .description(format!("Round trip: `{latency:?}`"))
+            .field_inline("Mode", if ctx.is_slash() { "slash" } else { "prefix" })
+            .field_inline("Latency µs", latency.as_micros().to_string())
+            .timestamp_now()
+            .footer(format!("Responded by {}", ctx.bot.identity.username));
+
+        if let Some(user) = ctx.author() {
+            embed = embed.author_user(user);
+        }
+        ctx.reply_embed(&embed).await
     }
 }

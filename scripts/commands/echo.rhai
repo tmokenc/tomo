@@ -3,6 +3,7 @@ fn meta() {
         name: "echo",
         description: "Repeat whatever you say back at you.",
         slash: false,   // slash needs declared options — scripts only use prefix for now.
+        category: "Utility",
     }
 }
 

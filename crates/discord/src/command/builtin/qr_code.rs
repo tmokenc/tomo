@@ -14,9 +14,12 @@ use tracing::warn;
 use twilight_model::http::attachment::Attachment as HttpAttachment;
 
 use tomo_core::error::{Error, Result};
+use tomo_embed::{Embed2, Embedable};
 
 use crate::command::{Command, CommandContext, CommandMeta};
-use crate::util::fetch_image_from_context;
+use crate::util::{fetch_image_from_context, truncate};
+
+const QR_FILENAME: &str = "tomo_qrcode.png";
 
 pub struct QrCodeCommand;
 
@@ -31,45 +34,17 @@ impl Command for QrCodeCommand {
             )
             .aliases(["qrcode", "qr_code"])
             .category("Image")
+            .string_option("text", "Text to encode (leave empty to decode an attached image)", false)
         });
         &META
     }
 
     async fn execute(&self, ctx: CommandContext) -> Result<()> {
         let text = ctx.args().trim();
-
         if !text.is_empty() {
             return generate(&ctx, text.to_owned()).await;
         }
-
-        let bytes = match fetch_image_from_context(&ctx).await {
-            Ok(Some(b)) => b,
-            Ok(None) => {
-                return ctx
-                    .reply(
-                        "Give me text to encode, or attach (or reply to) an image \
-                         containing a QR code.",
-                    )
-                    .await
-            }
-            Err(e) => return ctx.reply(&format!("Couldn't fetch image: `{e}`")).await,
-        };
-
-        let bytes_vec = bytes.to_vec();
-        let decoded = task::spawn_blocking(move || decode_blocking(&bytes_vec))
-            .await
-            .map_err(|e| Error::config(format!("qr decode join: {e}")))??;
-
-        if decoded.is_empty() {
-            return ctx.reply("No QR codes I could read in that image.").await;
-        }
-
-        let body = decoded
-            .iter()
-            .map(|s| format!("```\n{s}\n```"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ctx.reply(&body).await
+        decode(&ctx).await
     }
 }
 
@@ -77,20 +52,43 @@ impl Command for QrCodeCommand {
 
 async fn generate(ctx: &CommandContext, text: String) -> Result<()> {
     if text.len() > 2_000 {
-        return ctx
-            .reply("Text is too long — QR codes get huge past a couple hundred bytes.")
-            .await;
+        let mut embed = Embed2::warning()
+            .title("QR code")
+            .description("Text is too long — QR codes get huge past a couple hundred bytes.")
+            .field_inline("Bytes", text.len().to_string())
+            .field_inline("Limit", "2000")
+            .timestamp_now();
+        if let Some(user) = ctx.author() {
+            embed = embed.author_user(user);
+        }
+        return ctx.reply_embed(&embed).await;
     }
 
+    let text_for_embed = text.clone();
     let png: Vec<u8> = task::spawn_blocking(move || render_png(&text))
         .await
         .map_err(|e| Error::config(format!("qrcode join: {e}")))??;
 
-    let attachment = HttpAttachment::from_bytes("tomo_qrcode.png".into(), png, 0);
+    let mut embed = Embed2::info()
+        .title("QR code")
+        .description(format!("```\n{}\n```", truncate(&text_for_embed, 1024)))
+        .image_attachment(QR_FILENAME)
+        .field_inline("Bytes", text_for_embed.len().to_string())
+        .field_inline("Chars", text_for_embed.chars().count().to_string())
+        .field_inline("PNG", format!("{} B", png.len()))
+        .footer("Encoded with qrcode-rs · 256×256 min")
+        .timestamp_now();
+    if let Some(user) = ctx.author() {
+        embed = embed.author_user(user);
+    }
+
+    let attachment = HttpAttachment::from_bytes(QR_FILENAME.into(), png, 0);
+    let built = embed.build_embed();
     ctx.bot
         .http
         .create_message(ctx.channel_id())
         .attachments(std::slice::from_ref(&attachment))
+        .embeds(std::slice::from_ref(&built))
         .await
         .map_err(|e| Error::config(format!("qr send: {e}")))?;
     Ok(())
@@ -114,6 +112,78 @@ fn render_png(text: &str) -> Result<Vec<u8>> {
 }
 
 // ---------- Decoding ----------
+
+async fn decode(ctx: &CommandContext) -> Result<()> {
+    let bytes = match fetch_image_from_context(ctx).await {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            let mut embed = Embed2::warning()
+                .title("QR code")
+                .description(
+                    "Give me text to encode, or attach (or reply to) an image \
+                     containing a QR code.",
+                )
+                .timestamp_now();
+            if let Some(user) = ctx.author() {
+                embed = embed.author_user(user);
+            }
+            return ctx.reply_embed(&embed).await;
+        }
+        Err(e) => {
+            let mut embed = Embed2::error()
+                .title("QR code")
+                .description(format!("Couldn't fetch image: `{e}`"))
+                .timestamp_now();
+            if let Some(user) = ctx.author() {
+                embed = embed.author_user(user);
+            }
+            return ctx.reply_embed(&embed).await;
+        }
+    };
+
+    let bytes_vec = bytes.to_vec();
+    let decoded = task::spawn_blocking(move || decode_blocking(&bytes_vec))
+        .await
+        .map_err(|e| Error::config(format!("qr decode join: {e}")))??;
+
+    if decoded.is_empty() {
+        let mut embed = Embed2::warning()
+            .title("QR code")
+            .description("No QR codes I could read in that image.")
+            .timestamp_now();
+        if let Some(user) = ctx.author() {
+            embed = embed.author_user(user);
+        }
+        return ctx.reply_embed(&embed).await;
+    }
+
+    let total_chars: usize = decoded.iter().map(|s| s.chars().count()).sum();
+    let mut embed = Embed2::success()
+        .title(if decoded.len() == 1 {
+            "QR code decoded".to_string()
+        } else {
+            format!("{} QR codes decoded", decoded.len())
+        })
+        .field_inline("Codes", decoded.len().to_string())
+        .field_inline("Total chars", total_chars.to_string())
+        .footer("Decoded with rqrr")
+        .timestamp_now();
+
+    if decoded.len() == 1 {
+        embed = embed.description(format!("```\n{}\n```", truncate(&decoded[0], 3500)));
+    } else {
+        for (i, content) in decoded.iter().enumerate() {
+            embed = embed.field_block(
+                format!("#{}", i + 1),
+                format!("```\n{}\n```", truncate(content, 1000)),
+            );
+        }
+    }
+    if let Some(user) = ctx.author() {
+        embed = embed.author_user(user);
+    }
+    ctx.reply_embed(&embed).await
+}
 
 fn decode_blocking(bytes: &[u8]) -> Result<Vec<String>> {
     let img = image::load_from_memory(bytes)

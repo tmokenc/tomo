@@ -22,7 +22,7 @@ pub mod registry;
 pub mod trigger;
 pub mod watcher;
 
-pub use ctx::{ScriptAction, ScriptCtx};
+pub use ctx::{ScriptAction, ScriptCtx, ScriptInit};
 pub use embed::ScriptEmbed;
 pub use manager::ScriptManager;
 pub use registry::{ScriptCommand, ScriptRegistry, ScriptTrigger};

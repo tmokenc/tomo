@@ -5,8 +5,10 @@
 //! launches alongside any other services (telegram, web admin, etc.).
 
 pub mod command;
+pub mod ehentai_view;
 pub mod gemini_mention;
 pub mod intents;
+pub mod nhentai_view;
 pub mod prelude;
 pub mod reminder;
 pub mod rpc_server;
@@ -14,6 +16,7 @@ pub mod runtime;
 pub mod state;
 pub mod trigger;
 pub mod util;
+pub mod vndb_view;
 
 pub use command::{Command, CommandContext, CommandMeta, CommandRegistry, InvocationSource};
 pub use rpc_server::{RpcConfig, RpcService};

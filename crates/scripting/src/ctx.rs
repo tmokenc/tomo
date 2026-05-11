@@ -21,6 +21,27 @@ pub enum ScriptAction {
     Log(String),
 }
 
+/// Everything the host knows about an invocation that the script may want to
+/// reach for. Used to construct a [`ScriptCtx`] without an exploding positional
+/// arg list.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptInit {
+    pub channel_id: u64,
+    pub guild_id: Option<u64>,
+    pub user_id: u64,
+    pub message_id: u64,
+    pub args: String,
+
+    pub author_name: String,
+    pub author_avatar_url: Option<String>,
+
+    pub bot_name: String,
+    pub bot_avatar_url: Option<String>,
+    pub bot_started_at_unix: i64,
+
+    pub now_unix: i64,
+}
+
 /// Context object passed into Rhai's `execute(ctx)`.
 ///
 /// The action sender is `Clone`-cheap; Rhai is allowed to clone the value
@@ -32,38 +53,37 @@ pub struct ScriptCtx {
     pub user_id: i64,
     pub message_id: i64,
     pub args: String,
+
+    pub author_name: String,
+    pub author_avatar_url: String,
+
     pub bot_name: String,
+    pub bot_avatar_url: String,
     /// Unix timestamp the bot booted on — lets scripts compute uptime.
     pub bot_started_at_unix: i64,
     /// Unix timestamp the bot saw the invoking message.
     pub now_unix: i64,
+
     actions: Sender<ScriptAction>,
 }
 
 impl ScriptCtx {
     /// Build a context and its receiving half. The host keeps the receiver to
     /// drain `ScriptAction`s once the script returns.
-    #[allow(clippy::too_many_arguments)]
-    pub fn channel(
-        channel_id: u64,
-        guild_id: Option<u64>,
-        user_id: u64,
-        message_id: u64,
-        args: String,
-        bot_name: String,
-        bot_started_at_unix: i64,
-        now_unix: i64,
-    ) -> (Self, Receiver<ScriptAction>) {
+    pub fn new(init: ScriptInit) -> (Self, Receiver<ScriptAction>) {
         let (tx, rx) = flume::unbounded();
         let ctx = Self {
-            channel_id: channel_id as i64,
-            guild_id: guild_id.map(|g| g as i64).unwrap_or(0),
-            user_id: user_id as i64,
-            message_id: message_id as i64,
-            args,
-            bot_name,
-            bot_started_at_unix,
-            now_unix,
+            channel_id: init.channel_id as i64,
+            guild_id: init.guild_id.map(|g| g as i64).unwrap_or(0),
+            user_id: init.user_id as i64,
+            message_id: init.message_id as i64,
+            args: init.args,
+            author_name: init.author_name,
+            author_avatar_url: init.author_avatar_url.unwrap_or_default(),
+            bot_name: init.bot_name,
+            bot_avatar_url: init.bot_avatar_url.unwrap_or_default(),
+            bot_started_at_unix: init.bot_started_at_unix,
+            now_unix: init.now_unix,
             actions: tx,
         };
         (ctx, rx)
@@ -97,8 +117,8 @@ impl CustomType for ScriptCtx {
                 this.push(ScriptAction::Log(msg.to_string()));
             })
             // ---- Embed dispatch ----
-            // Full-builder form: build a `ScriptEmbed` step by step, then
-            // hand it over.
+            // Full-builder form: build a `ScriptEmbed` step by step, then hand
+            // it over.
             .with_fn("reply_embed", |this: &mut ScriptCtx, embed: ScriptEmbed| {
                 this.push(ScriptAction::ReplyEmbed(embed.into_inner()));
             })
@@ -137,7 +157,14 @@ impl CustomType for ScriptCtx {
             .with_get("user_id", |this: &mut ScriptCtx| this.user_id)
             .with_get("message_id", |this: &mut ScriptCtx| this.message_id)
             .with_get("args", |this: &mut ScriptCtx| this.args.clone())
+            .with_get("author_name", |this: &mut ScriptCtx| this.author_name.clone())
+            .with_get("author_avatar_url", |this: &mut ScriptCtx| {
+                this.author_avatar_url.clone()
+            })
             .with_get("bot_name", |this: &mut ScriptCtx| this.bot_name.clone())
+            .with_get("bot_avatar_url", |this: &mut ScriptCtx| {
+                this.bot_avatar_url.clone()
+            })
             .with_get("now_unix", |this: &mut ScriptCtx| this.now_unix)
             .with_get("bot_started_at_unix", |this: &mut ScriptCtx| this.bot_started_at_unix)
             .with_get("uptime_seconds", |this: &mut ScriptCtx| {

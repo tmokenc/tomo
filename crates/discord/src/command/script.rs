@@ -21,15 +21,24 @@ pub struct ScriptCommandAdapter {
 
 impl ScriptCommandAdapter {
     pub fn new(script: ScriptCommand, manager: Arc<ScriptManager>) -> Self {
+        // Scripts can declare their own category via `meta.category` so they
+        // slot into the help embed alongside built-ins (e.g. `General`,
+        // `Utility`) rather than being ghettoised in a `Script` bucket.
+        let category = script
+            .category
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "General".into());
         let meta = CommandMeta {
             name: script.name.clone(),
             description: script.description.clone(),
             aliases: script.aliases.clone(),
-            category: "Script",
+            category,
             slash: script.slash,
             prefix: script.prefix,
             guild_only: script.guild_only,
             owner_only: false,
+            options: Vec::new(),
         };
         Self { script, meta, manager }
     }
@@ -42,16 +51,22 @@ impl Command for ScriptCommandAdapter {
     }
 
     async fn execute(&self, ctx: CommandContext) -> Result<()> {
-        let (script_ctx, rx) = ScriptCtx::channel(
-            ctx.channel_id().get(),
-            ctx.guild_id().map(|g| g.get()),
-            ctx.author_id().get(),
-            ctx.message_id().map(|m| m.get()).unwrap_or(0),
-            ctx.args().to_string(),
-            ctx.bot.identity.username.clone(),
-            ctx.bot.started_at.timestamp(),
-            chrono::Utc::now().timestamp(),
-        );
+        let (script_ctx, rx) = ScriptCtx::new(tomo_scripting::ScriptInit {
+            channel_id: ctx.channel_id().get(),
+            guild_id: ctx.guild_id().map(|g| g.get()),
+            user_id: ctx.author_id().get(),
+            message_id: ctx.message_id().map(|m| m.get()).unwrap_or(0),
+            args: ctx.args().to_string(),
+            author_name: ctx
+                .author()
+                .map(|u| u.name.clone())
+                .unwrap_or_default(),
+            author_avatar_url: ctx.author_avatar_url(),
+            bot_name: ctx.bot.identity.username.clone(),
+            bot_avatar_url: ctx.bot.identity.avatar_url.clone(),
+            bot_started_at_unix: ctx.bot.started_at.timestamp(),
+            now_unix: chrono::Utc::now().timestamp(),
+        });
 
         let actions = time::timeout(
             Duration::from_secs(3),

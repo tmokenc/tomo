@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicI64;
 
 use arc_swap::ArcSwap;
 use chrono::{DateTime, Utc};
-use twilight_cache_inmemory::DefaultInMemoryCache;
+use tomo_cache::PersistentCache;
 use twilight_http::Client;
 use twilight_model::id::Id;
 use twilight_model::id::marker::{ApplicationMarker, UserMarker};
@@ -38,7 +38,7 @@ pub type Bot = Arc<BotState>;
 /// Holds every piece of long-lived state the bot needs at runtime.
 pub struct BotState {
     pub http: Arc<Client>,
-    pub cache: Arc<DefaultInMemoryCache>,
+    pub cache: Arc<PersistentCache>,
     pub standby: Arc<Standby>,
     pub config: Arc<Config>,
     pub db: Arc<dyn KvStore>,

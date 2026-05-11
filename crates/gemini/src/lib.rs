@@ -8,6 +8,6 @@ pub mod client;
 pub mod conversation;
 pub mod ratelimit;
 
-pub use client::{GeminiClient, GenerateError, GenerateResponse};
+pub use client::{GeminiClient, GenerateError, GenerateResponse, HealthInfo};
 pub use conversation::{ConversationStore, Role, Turn};
 pub use ratelimit::RateLimiter;

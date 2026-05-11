@@ -6,12 +6,13 @@ use std::sync::LazyLock;
 
 use async_trait::async_trait;
 
-use tomo_core::error::Result;
+use tomo_core::error::{Error, Result};
 use tomo_embed::Embed2;
 use tomo_requester::nhentai::parse_gallery_id;
 
 use crate::command::{Command, CommandContext, CommandMeta, InvocationSource};
-use crate::util::truncate;
+use crate::nhentai_view::gallery_embed;
+use crate::util::cache_pick_from_human;
 
 pub struct NhentaiCommand;
 
@@ -23,73 +24,70 @@ impl Command for NhentaiCommand {
                 .aliases(["nhen", "nh"])
                 .category("Search")
                 .guild_only()
+                .string_option("id", "Gallery id (e.g. 649114) or full nhentai.net URL", true)
         });
         &META
     }
 
     async fn execute(&self, ctx: CommandContext) -> Result<()> {
         if !is_nsfw_channel(&ctx) {
-            return ctx.reply("That command is NSFW-only.").await;
+            return reply_warn(&ctx, "That command is NSFW-only.").await;
         }
 
         let Some(id) = extract_id(&ctx) else {
-            return ctx
-                .reply("Give me a gallery id or an `nhentai.net/g/<id>/` URL.")
-                .await;
+            return reply_warn(
+                &ctx,
+                "Give me a gallery id or an `nhentai.net/g/<id>/` URL.",
+            )
+            .await;
         };
 
         let _ = ctx.bot.http.create_typing_trigger(ctx.channel_id()).await;
         let gallery = match ctx.bot.requester.nhentai(id).await {
             Ok(g) => g,
-            Err(e) => return ctx.reply(&format!("nhentai lookup failed: `{e}`")).await,
+            Err(e) => {
+                let mut err = Embed2::error()
+                    .title("nhentai")
+                    .description(format!("Lookup failed: `{e}`"))
+                    .timestamp_now();
+                if let Some(user) = ctx.author() {
+                    err = err.author_user(user);
+                }
+                return ctx.reply_embed(&err).await;
+            }
         };
 
-        let mut embed = Embed2::lovely()
-            .title(truncate(gallery.best_title(), 256))
-            .url(gallery.page_url());
-
-        if let Some(cover) = gallery.cover_url.as_ref() {
-            embed = embed.image(cover.clone());
-        }
-        if let Some(n) = gallery.page_count {
-            embed = embed.field_inline("Pages", n.to_string());
-        }
-        if let Some(n) = gallery.favorites {
-            embed = embed.field_inline("Favs", n.to_string());
-        }
-        if let Some(jpn) = gallery.title_japanese.as_ref() {
-            embed = embed.field_block("Japanese", truncate(jpn, 1024));
-        }
-
-        let artists: Vec<_> = gallery.tags_of("artist").collect();
-        if !artists.is_empty() {
-            embed = embed.field_block("Artist", truncate(&artists.join(", "), 1024));
-        }
-        let parodies: Vec<_> = gallery.tags_of("parody").collect();
-        if !parodies.is_empty() {
-            embed = embed.field_block("Parody", truncate(&parodies.join(", "), 1024));
-        }
-        let langs: Vec<_> = gallery.tags_of("language").collect();
-        if !langs.is_empty() {
-            embed = embed.field_inline("Language", langs.join(", "));
-        }
-        let tags: Vec<_> = gallery.tags_of("tag").take(30).collect();
-        if !tags.is_empty() {
-            embed = embed.field_block("Tags", truncate(&tags.join(", "), 1024));
-        }
-        if let Some(when) = gallery.upload_unix {
-            embed = embed.timestamp_unix(when);
-        }
-
-        ctx.reply_embed(&embed).await
+        let embed = gallery_embed(&gallery, ctx.author()).build();
+        ctx.bot
+            .http
+            .create_message(ctx.channel_id())
+            .embeds(std::slice::from_ref(&embed))
+            .await
+            .map_err(|e| Error::config(format!("nhentai send: {e}")))?;
+        Ok(())
     }
 }
 
-fn extract_id(ctx: &CommandContext) -> Option<u64> {
-    let args = ctx.args().trim();
-    if let Some(id) = parse_gallery_id(args) {
-        return Some(id);
+async fn reply_warn(ctx: &CommandContext, message: &str) -> Result<()> {
+    let mut embed = Embed2::warning()
+        .title("nhentai")
+        .description(message.to_string())
+        .timestamp_now();
+    if let Some(user) = ctx.author() {
+        embed = embed.author_user(user);
     }
+    ctx.reply_embed(&embed).await
+}
+
+fn extract_id(ctx: &CommandContext) -> Option<u64> {
+    // 1. Explicit args.
+    let args = ctx.args().trim();
+    if !args.is_empty() {
+        if let Some(id) = parse_gallery_id(args) {
+            return Some(id);
+        }
+    }
+    // 2. Reply target (prefix invocations only — slash has no implicit reply).
     if let InvocationSource::Prefix { msg, .. } = &ctx.source {
         if let Some(referenced) = msg.referenced_message.as_deref() {
             if let Some(id) = parse_gallery_id(&referenced.content) {
@@ -97,7 +95,8 @@ fn extract_id(ctx: &CommandContext) -> Option<u64> {
             }
         }
     }
-    None
+    // 3. Walk back through cached non-bot messages.
+    cache_pick_from_human(&ctx.bot, ctx.channel_id(), parse_gallery_id)
 }
 
 fn is_nsfw_channel(ctx: &CommandContext) -> bool {

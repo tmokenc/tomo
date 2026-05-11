@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use humantime::parse_duration;
 
 use tomo_core::error::Result;
@@ -15,6 +15,7 @@ use tomo_embed::Embed2;
 
 use crate::command::{Command, CommandContext, CommandMeta};
 use crate::reminder::{self, Reminder, MAX_DURATION, MAX_PER_USER};
+use crate::util::truncate;
 
 pub struct RemindCommand;
 
@@ -24,10 +25,15 @@ impl Command for RemindCommand {
         static META: LazyLock<CommandMeta> = LazyLock::new(|| {
             CommandMeta::new(
                 "remind",
-                "Set a personal reminder. Subcommands: `list`, `remove <n>`.",
+                "Set a reminder. Use `list` to see them, `remove <n>` to cancel.",
             )
             .aliases(["remindme", "reminder"])
             .category("Utility")
+            .string_option(
+                "command",
+                "Either `<duration> <message>` (e.g. `1h take out trash`), `list`, or `remove <n>`",
+                true,
+            )
         });
         &META
     }
@@ -48,41 +54,53 @@ impl Command for RemindCommand {
 
 async fn set_handler(ctx: &CommandContext, raw: &str) -> Result<()> {
     if raw.is_empty() {
-        return ctx
-            .reply("Usage: `remind <duration> <message>` — e.g. `remind 1h 30m take out trash`.")
-            .await;
+        return reply_warn(
+            ctx,
+            "Reminder",
+            "Usage: `remind <duration> <message>` — e.g. `remind 1h 30m take out trash`.",
+        )
+        .await;
     }
 
     let (duration, rest) = match consume_duration_prefix(raw) {
         Some(v) => v,
-        None => return ctx.reply(&format!("I couldn't parse a duration from `{raw}`.")).await,
+        None => {
+            return reply_warn(ctx, "Reminder", &format!("I couldn't parse a duration from `{raw}`."))
+                .await
+        }
     };
 
     if duration > MAX_DURATION {
-        return ctx
-            .reply(&format!(
-                "That's more than 90 days away — the cap is `{}`.",
+        return reply_warn(
+            ctx,
+            "Reminder",
+            &format!(
+                "That's more than the cap of `{}`.",
                 humantime::format_duration(MAX_DURATION)
-            ))
-            .await;
+            ),
+        )
+        .await;
     }
     if duration.is_zero() {
-        return ctx.reply("Duration must be greater than zero.").await;
+        return reply_warn(ctx, "Reminder", "Duration must be greater than zero.").await;
     }
     let content = rest.trim();
     if content.is_empty() {
-        return ctx.reply("Give me a message to remind you about.").await;
+        return reply_warn(ctx, "Reminder", "Give me a message to remind you about.").await;
     }
     if content.len() > 1024 {
-        return ctx.reply("Reminder text is too long (>1024 chars).").await;
+        return reply_warn(ctx, "Reminder", "Reminder text is too long (>1024 chars).").await;
     }
 
     let user_id = ctx.author_id().get();
     let existing = reminder::list_user(&ctx.bot, user_id).await?;
     if existing.len() >= MAX_PER_USER {
-        return ctx
-            .reply(&format!("You already have {MAX_PER_USER} pending reminders — clear one first."))
-            .await;
+        return reply_warn(
+            ctx,
+            "Reminder",
+            &format!("You already have {MAX_PER_USER} pending reminders — clear one first."),
+        )
+        .await;
     }
 
     let when_unix = Utc::now().timestamp() + duration.as_secs() as i64;
@@ -98,11 +116,22 @@ async fn set_handler(ctx: &CommandContext, raw: &str) -> Result<()> {
     reminder::schedule(&ctx.bot, &r).await?;
 
     let pretty = humantime::format_duration(duration);
-    let embed = Embed2::success()
+    let mut embed = Embed2::success()
         .title("Reminder set")
-        .description(format!("In **{pretty}** — I'll DM you."))
+        .description(format!(
+            "In **{pretty}** — I'll DM you.\nDelivery: <t:{when_unix}:F> (<t:{when_unix}:R>)",
+        ))
         .field_block("Message", content.to_string())
+        .field_inline("ID", format!("`{}`", r.id))
+        .field_inline("Slots left", (MAX_PER_USER.saturating_sub(existing.len() + 1)).to_string())
+        .field_inline("In", pretty.to_string())
+        .footer(format!(
+            "Cancel with `remind remove <n>` · max {MAX_PER_USER} per user"
+        ))
         .timestamp_unix(when_unix);
+    if let Some(user) = ctx.author() {
+        embed = embed.author_user(user);
+    }
     ctx.reply_embed(&embed).await
 }
 
@@ -110,41 +139,77 @@ async fn list_handler(ctx: &CommandContext) -> Result<()> {
     let user_id = ctx.author_id().get();
     let entries = reminder::list_user(&ctx.bot, user_id).await?;
     if entries.is_empty() {
-        return ctx.reply("You have no pending reminders.").await;
+        return reply_warn(ctx, "Reminders", "You have no pending reminders.").await;
     }
 
-    let mut body = String::new();
+    let mut body = String::with_capacity(entries.len() * 80);
     for (i, r) in entries.iter().enumerate() {
-        let when = DateTime::from_timestamp(r.when_unix, 0)
-            .map(|t| t.to_rfc3339())
-            .unwrap_or_else(|| r.when_unix.to_string());
         body.push_str(&format!(
-            "**{}.** <t:{}:R> (`{}`)\n— {}\n",
+            "**{}.** <t:{}:R> · <t:{}:f>\n— {}\n",
             i + 1,
             r.when_unix,
-            when,
-            r.content
+            r.when_unix,
+            truncate(&r.content, 160),
         ));
     }
-    let embed = Embed2::info()
+    let next_when = entries.iter().map(|r| r.when_unix).min().unwrap_or(0);
+    let mut embed = Embed2::info()
         .title("Your reminders")
         .description(body)
-        .footer("Use `remind remove <n>` to cancel one.");
+        .field_inline("Pending", entries.len().to_string())
+        .field_inline("Slots left", (MAX_PER_USER.saturating_sub(entries.len())).to_string())
+        .field_inline("Next", format!("<t:{next_when}:R>"))
+        .footer(format!("Use `remind remove <n>` to cancel · max {MAX_PER_USER}"))
+        .timestamp_now();
+    if let Some(user) = ctx.author() {
+        embed = embed.author_user(user);
+    }
     ctx.reply_embed(&embed).await
 }
 
 async fn remove_handler(ctx: &CommandContext, rest: &str) -> Result<()> {
     let idx: usize = match rest.trim().parse() {
         Ok(n) if n >= 1 => n,
-        _ => return ctx.reply("Usage: `remind remove <n>` — the index from `remind list`.").await,
+        _ => {
+            return reply_warn(
+                ctx,
+                "Reminder",
+                "Usage: `remind remove <n>` — the index from `remind list`.",
+            )
+            .await
+        }
     };
     let user_id = ctx.author_id().get();
     let entries = reminder::list_user(&ctx.bot, user_id).await?;
     let Some(target) = entries.get(idx - 1) else {
-        return ctx.reply("No reminder at that index.").await;
+        return reply_warn(ctx, "Reminder", "No reminder at that index.").await;
     };
+    let removed_content = target.content.clone();
+    let removed_when = target.when_unix;
     reminder::delete(&ctx.bot, target).await?;
-    ctx.reply(&format!("Removed reminder #{idx}.")).await
+
+    let mut embed = Embed2::success()
+        .title("Reminder removed")
+        .description(format!("Removed reminder **#{idx}**."))
+        .field_block("Message", truncate(&removed_content, 1024))
+        .field_inline("Was due", format!("<t:{removed_when}:R>"))
+        .field_inline("Remaining", (entries.len() - 1).to_string())
+        .timestamp_now();
+    if let Some(user) = ctx.author() {
+        embed = embed.author_user(user);
+    }
+    ctx.reply_embed(&embed).await
+}
+
+async fn reply_warn(ctx: &CommandContext, title: &str, message: &str) -> Result<()> {
+    let mut embed = Embed2::warning()
+        .title(title.to_string())
+        .description(message.to_string())
+        .timestamp_now();
+    if let Some(user) = ctx.author() {
+        embed = embed.author_user(user);
+    }
+    ctx.reply_embed(&embed).await
 }
 
 /// Parse a leading duration prefix made up of one or more `humantime` tokens.
@@ -158,7 +223,6 @@ fn consume_duration_prefix(raw: &str) -> Option<(Duration, String)> {
         match parse_duration(token) {
             Ok(d) => {
                 total += d;
-                // bump past this token + its trailing whitespace
                 let after = &raw[consumed..];
                 let local_pos = after.find(token)? + token.len();
                 consumed += local_pos;
@@ -175,4 +239,3 @@ fn consume_duration_prefix(raw: &str) -> Option<(Duration, String)> {
     }
     Some((total, raw[consumed..].to_string()))
 }
-

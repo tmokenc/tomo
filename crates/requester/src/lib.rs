@@ -20,12 +20,14 @@ pub mod ehentai;
 pub mod kanji;
 pub mod nhentai;
 pub mod urban;
+pub mod vndb;
 
 pub use booru::{BooruPost, BooruRating, BooruSource};
 pub use ehentai::{EhentaiGallery, EhentaiId};
 pub use kanji::{KanjiEntry, KanjiExample, KanjiSearch};
 pub use nhentai::{NhentaiGallery, NhentaiTag};
 pub use urban::UrbanDefinition;
+pub use vndb::{VndbImage, VndbProducer, VndbTag, VndbVn};
 
 use std::time::Duration;
 

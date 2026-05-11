@@ -3,11 +3,12 @@ fn meta() {
         name: "coin",
         description: "Flip a coin.",
         aliases: ["flip"],
+        category: "Utility",
     }
 }
 
 fn execute(ctx) {
-    let r = random_int(0, 2);
-    let side = if r == 0 { "Heads" } else { "Tails" };
-    ctx.embed("Coin flip", side, color_info());
+    let heads = random_int(0, 2) == 0;
+    let face = if heads { "🪙 Heads" } else { "🌑 Tails" };
+    ctx.reply(face);
 }

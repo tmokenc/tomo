@@ -3,11 +3,12 @@
 //! Scripts build an embed step by step:
 //!
 //! ```rhai
-//! let e = embed();
-//! e.title("Hello");
-//! e.color(color_info());
-//! e.description("Body text");
+//! let e = embed_success();
+//! e.title("Done");
+//! e.description("It worked.");
 //! e.field("foo", "bar", true);
+//! e.footer("Tomo bot");
+//! e.timestamp_now();
 //! ctx.reply_embed(e);
 //! ```
 
@@ -27,6 +28,16 @@ impl ScriptEmbed {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn from_embed(inner: Embed2) -> Self {
+        Self { inner }
+    }
+
+    pub fn info()    -> Self { Self::from_embed(Embed2::info()) }
+    pub fn success() -> Self { Self::from_embed(Embed2::success()) }
+    pub fn error()   -> Self { Self::from_embed(Embed2::error()) }
+    pub fn warning() -> Self { Self::from_embed(Embed2::warning()) }
+    pub fn lovely()  -> Self { Self::from_embed(Embed2::lovely()) }
 
     pub fn into_inner(self) -> Embed2 {
         self.inner
@@ -77,7 +88,11 @@ impl CustomType for ScriptEmbed {
                 this.alter(|e| e.footer(v.to_string()));
             })
             .with_fn("footer_with", |this: &mut ScriptEmbed, text: &str, icon: &str| {
-                this.alter(|e| e.footer_with(text.to_string(), icon.to_string()));
+                if icon.is_empty() {
+                    this.alter(|e| e.footer(text.to_string()));
+                } else {
+                    this.alter(|e| e.footer_with(text.to_string(), icon.to_string()));
+                }
             })
             // ---- fields ----
             .with_fn(
