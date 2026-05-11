@@ -71,17 +71,31 @@ impl Embed2 {
     // ---------- Top-level text ----------
 
     pub fn title(mut self, title: impl Into<String>) -> Self {
-        self.inner = self.inner.title(truncate(&title.into(), TITLE));
+        let t = truncate(&title.into(), TITLE);
+        // Discord rejects embeds with an empty title (`Invalid Form Body:
+        // embeds[].title: Must be non-empty`). Silently skip rather than
+        // ship a payload that's guaranteed to 400.
+        if !t.trim().is_empty() {
+            self.inner = self.inner.title(t);
+        }
         self
     }
 
     pub fn description(mut self, desc: impl Into<String>) -> Self {
-        self.inner = self.inner.description(truncate(&desc.into(), DESCRIPTION));
+        let d = truncate(&desc.into(), DESCRIPTION);
+        if !d.trim().is_empty() {
+            self.inner = self.inner.description(d);
+        }
         self
     }
 
     pub fn url(mut self, url: impl Into<String>) -> Self {
-        self.inner = self.inner.url(url.into());
+        let u = url.into();
+        // Discord rejects empty `url`. Same rationale as the empty-field
+        // guard — silently no-op rather than 400 the whole message.
+        if !u.trim().is_empty() {
+            self.inner = self.inner.url(u);
+        }
         self
     }
 
@@ -124,7 +138,11 @@ impl Embed2 {
         icon_url: Option<impl Into<String>>,
         url: Option<impl Into<String>>,
     ) -> Self {
-        let mut builder = EmbedAuthorBuilder::new(truncate(&name.into(), AUTHOR_NAME));
+        let name = truncate(&name.into(), AUTHOR_NAME);
+        if name.trim().is_empty() {
+            return self;
+        }
+        let mut builder = EmbedAuthorBuilder::new(name);
         if let Some(icon) = icon_url {
             if let Ok(src) = ImageSource::url(icon.into()) {
                 builder = builder.icon_url(src);
@@ -145,9 +163,12 @@ impl Embed2 {
     // ---------- Footer ----------
 
     pub fn footer(mut self, text: impl Into<String>) -> Self {
-        self.inner = self
-            .inner
-            .footer(EmbedFooterBuilder::new(truncate(&text.into(), FOOTER_TEXT)).build());
+        let t = truncate(&text.into(), FOOTER_TEXT);
+        if !t.trim().is_empty() {
+            self.inner = self
+                .inner
+                .footer(EmbedFooterBuilder::new(t).build());
+        }
         self
     }
 
@@ -156,7 +177,11 @@ impl Embed2 {
         text: impl Into<String>,
         icon_url: impl Into<String>,
     ) -> Self {
-        let mut footer = EmbedFooterBuilder::new(truncate(&text.into(), FOOTER_TEXT));
+        let t = truncate(&text.into(), FOOTER_TEXT);
+        if t.trim().is_empty() {
+            return self;
+        }
+        let mut footer = EmbedFooterBuilder::new(t);
         if let Ok(src) = ImageSource::url(icon_url.into()) {
             footer = footer.icon_url(src);
         }
@@ -168,6 +193,11 @@ impl Embed2 {
 
     /// Add a field. Names truncate to 256 chars, values to 1024. After 25
     /// fields are added, further calls are no-ops.
+    ///
+    /// Discord rejects embeds with an empty field name or value (`Invalid
+    /// Form Body`). Calls where either trims to empty are silently dropped
+    /// here rather than at the network — keeps call-sites concise (they can
+    /// just feed in `format!(…)` outputs without guarding each one).
     pub fn field(
         mut self,
         name: impl Into<String>,
@@ -177,10 +207,12 @@ impl Embed2 {
         if self.field_count >= MAX_FIELDS {
             return self;
         }
-        let mut field = EmbedFieldBuilder::new(
-            truncate(&name.into(), FIELD_NAME),
-            truncate(&value.into(), FIELD_VALUE),
-        );
+        let name = truncate(&name.into(), FIELD_NAME);
+        let value = truncate(&value.into(), FIELD_VALUE);
+        if name.trim().is_empty() || value.trim().is_empty() {
+            return self;
+        }
+        let mut field = EmbedFieldBuilder::new(name, value);
         if inline {
             field = field.inline();
         }
@@ -274,4 +306,67 @@ fn avatar_url(user_id: Id<UserMarker>, hash: Option<String>) -> Option<String> {
     let hash = hash?;
     let ext = if hash.starts_with("a_") { "gif" } else { "png" };
     Some(format!("https://cdn.discordapp.com/avatars/{user_id}/{hash}.{ext}?size=256"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Embed2;
+
+    /// Each setter that takes user-provided text must skip empty input so
+    /// Discord never sees `Invalid Form Body`. These tests pin the contract
+    /// at the API surface — callers can hand in empty strings without
+    /// special-casing.
+    #[test]
+    fn empty_field_value_is_skipped() {
+        let e = Embed2::new()
+            .title("ok")
+            .field("name", "", false)
+            .field("name2", "value2", false)
+            .build();
+        // Only the field with a non-empty value survives.
+        assert_eq!(e.fields.len(), 1);
+        assert_eq!(e.fields[0].name, "name2");
+    }
+
+    #[test]
+    fn empty_field_name_is_skipped() {
+        let e = Embed2::new()
+            .title("ok")
+            .field("", "value", false)
+            .build();
+        assert!(e.fields.is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_field_skipped() {
+        let e = Embed2::new()
+            .title("ok")
+            .field("name", "   \n  ", false)
+            .build();
+        assert!(e.fields.is_empty());
+    }
+
+    #[test]
+    fn empty_description_is_dropped() {
+        let e = Embed2::new().title("ok").description("").build();
+        assert!(e.description.is_none());
+    }
+
+    #[test]
+    fn empty_title_is_dropped() {
+        let e = Embed2::new().title("").description("body").build();
+        assert!(e.title.is_none());
+    }
+
+    #[test]
+    fn empty_footer_is_dropped() {
+        let e = Embed2::new().title("ok").footer("").build();
+        assert!(e.footer.is_none());
+    }
+
+    #[test]
+    fn empty_url_is_dropped() {
+        let e = Embed2::new().title("ok").url("").build();
+        assert!(e.url.is_none());
+    }
 }
