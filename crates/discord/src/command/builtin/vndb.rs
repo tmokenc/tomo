@@ -2,18 +2,21 @@
 //! URL. Single match goes through as a regular embed; multiple matches are
 //! handed off to the paginator so the user can flip between candidates.
 
-use std::sync::{Arc, LazyLock};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
+use tomo_pagination::{PageSource, Paginator};
 use twilight_model::channel::message::Embed;
+use twilight_model::user::User;
 
 use tomo_core::error::Result;
 use tomo_embed::{Embed2, Embedable};
-use tomo_pagination::{Paginator, VecPageSource};
 use tomo_requester::vndb::parse_vn_id;
-use tomo_requester::VndbVn;
+use tomo_requester::{VndbBrief, VndbVn};
 
 use crate::command::{Command, CommandContext, CommandMeta};
+use crate::state::Bot;
 use crate::util::truncate;
 use crate::vndb_view::gallery_embed;
 
@@ -55,15 +58,18 @@ impl Command for VndbCommand {
             return run_direct(&ctx, &id).await;
         }
 
-        let results = match ctx.bot.requester.vndb_search(query, 15).await {
+        // Brief search — `id`/`title`/`alttitle`/`released` only. Full
+        // records are fetched lazily by the paginator per page so the user
+        // doesn't pay for 15 descriptions+tag lists upfront.
+        let briefs = match ctx.bot.requester.vndb_search_brief(query, 15).await {
             Ok(v) => v,
             Err(e) => return reply_error(&ctx, &format!("Search failed: `{e}`")).await,
         };
 
-        match results.len() {
+        match briefs.len() {
             0 => reply_warn(&ctx, &format!("No VN matched `{}`", truncate(query, 200))).await,
-            1 => send_single(&ctx, &results[0]).await,
-            _ => send_paginated(ctx, results).await,
+            1 => run_direct(&ctx, &briefs[0].id.clone()).await,
+            _ => send_paginated(ctx, briefs).await,
         }
     }
 }
@@ -84,30 +90,134 @@ async fn send_single(ctx: &CommandContext, vn: &VndbVn) -> Result<()> {
     ctx.reply_embed(&embed).await
 }
 
-/// Multi-match path: build one embed per VN, hand them to the paginator.
-async fn send_paginated(ctx: CommandContext, results: Vec<VndbVn>) -> Result<()> {
+/// Multi-match path: hand the briefs to a lazy paginator that fetches each
+/// VN's full body the moment the user lands on its page. Already-viewed
+/// pages are cached, so flipping back is free.
+async fn send_paginated(ctx: CommandContext, briefs: Vec<VndbBrief>) -> Result<()> {
     let nsfw = is_nsfw_channel(&ctx);
-    let total = results.len();
-    let author = ctx.author().cloned();
-    let pages: Vec<Embed> = results
-        .iter()
-        .enumerate()
-        .map(|(i, vn)| {
-            let mut e = gallery_embed(vn, author.as_ref(), nsfw);
-            e = e.footer_with(
-                format!("vndb.org · result {} of {total}", i + 1),
-                VNDB_ICON,
-            );
-            e.build_embed()
-        })
-        .collect();
-
-    let invoker = ctx.author_id();
+    let invoker = ctx.author().cloned();
+    let total = briefs.len();
+    let source = Arc::new(LazyVndbPages::new(
+        Arc::clone(&ctx.bot),
+        briefs,
+        invoker,
+        nsfw,
+        total,
+    ));
+    let invoker_id = ctx.author_id();
     let channel_id = ctx.channel_id();
-    let source = Arc::new(VecPageSource::new(pages));
     Paginator::new(Arc::clone(&ctx.bot.http), Arc::clone(&ctx.bot.standby), source)
-        .run(channel_id, invoker)
+        .run(channel_id, invoker_id)
         .await
+}
+
+/// Page source that holds the search briefs and fetches the full VN per
+/// page on first access. Mirrors `LazyAniListPages` in spirit; the two
+/// don't share concrete code because the API shapes diverge.
+struct LazyVndbPages {
+    bot: Bot,
+    briefs: Vec<VndbBrief>,
+    invoker: Option<User>,
+    nsfw_channel: bool,
+    total: usize,
+    cache: Mutex<HashMap<usize, Embed>>,
+}
+
+impl LazyVndbPages {
+    fn new(
+        bot: Bot,
+        briefs: Vec<VndbBrief>,
+        invoker: Option<User>,
+        nsfw_channel: bool,
+        total: usize,
+    ) -> Self {
+        Self {
+            bot,
+            briefs,
+            invoker,
+            nsfw_channel,
+            total,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl PageSource for LazyVndbPages {
+    fn total_pages(&self) -> Option<usize> {
+        Some(self.total)
+    }
+
+    async fn page(&self, index: usize) -> Result<Embed> {
+        if let Ok(map) = self.cache.lock() {
+            if let Some(embed) = map.get(&index) {
+                return Ok(embed.clone());
+            }
+        }
+
+        let Some(brief) = self.briefs.get(index) else {
+            return Ok(Embed2::error()
+                .title("VNDB")
+                .description("Out of range.")
+                .footer_with("vndb.org", VNDB_ICON)
+                .build_embed());
+        };
+
+        let full = self.bot.requester.vndb_by_id(&brief.id).await;
+        let embed = match full {
+            Ok(Some(vn)) => {
+                let mut e = gallery_embed(&vn, self.invoker.as_ref(), self.nsfw_channel);
+                e = e.footer_with(
+                    format!("vndb.org · result {} of {}", index + 1, self.total),
+                    VNDB_ICON,
+                );
+                e.build_embed()
+            }
+            Ok(None) => brief_fallback(brief, self.invoker.as_ref(), index, self.total, "removed on VNDB"),
+            Err(e) => brief_fallback(
+                brief,
+                self.invoker.as_ref(),
+                index,
+                self.total,
+                &format!("Lookup failed: `{e}`"),
+            ),
+        };
+
+        if let Ok(mut map) = self.cache.lock() {
+            map.insert(index, embed.clone());
+        }
+        Ok(embed)
+    }
+}
+
+/// Show what we know from the search brief plus a reason the full fetch
+/// couldn't fill in the rest. Keeps the paginator usable instead of
+/// erroring out for one bad row.
+fn brief_fallback(
+    brief: &VndbBrief,
+    invoker: Option<&User>,
+    index: usize,
+    total: usize,
+    reason: &str,
+) -> Embed {
+    let mut e = Embed2::warning()
+        .title(truncate(brief.display_title(), 256))
+        .url(brief.url())
+        .description(format!(
+            "Couldn't load full details ({reason})."
+        ))
+        .field_inline("ID", format!("`{}`", brief.id))
+        .footer_with(
+            format!("vndb.org · result {} of {} · brief-only", index + 1, total),
+            VNDB_ICON,
+        );
+    if let Some(rel) = brief.released.as_ref().filter(|s| !s.is_empty()) {
+        e = e.field_inline("Released", rel.clone());
+    }
+    if let Some(user) = invoker {
+        e = e.author_user(user);
+    }
+    e.build_embed()
 }
 
 /// Detect "the user typed nothing but an id or a vndb URL". Whitespace is

@@ -4,6 +4,7 @@
 //! command/trigger framework and exposes a [`DiscordService`] that the binary
 //! launches alongside any other services (telegram, web admin, etc.).
 
+pub mod anilist_view;
 pub mod command;
 pub mod ehentai_view;
 pub mod gemini_mention;

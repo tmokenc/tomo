@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::command::Command;
 
+mod anime;
 mod booru;
 mod ehentai;
 mod gemini;
@@ -48,6 +49,8 @@ pub fn all() -> Vec<Arc<dyn Command>> {
         boxed(nhentai::NhentaiCommand),
         boxed(ehentai::EhentaiCommand),
         boxed(vndb::VndbCommand),
+        boxed(anime::AnimeCommand),
+        boxed(anime::MangaCommand),
         // — Image —
         boxed(qr_code::QrCodeCommand),
         boxed(ocr::OcrCommand),

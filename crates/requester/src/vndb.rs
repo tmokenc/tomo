@@ -138,8 +138,71 @@ struct ListResponse {
     count: Option<u32>,
 }
 
+#[derive(Debug, Deserialize)]
+struct BriefListResponse {
+    #[serde(default)]
+    results: Vec<VndbBrief>,
+}
+
+/// Lightweight result shape returned by [`Requester::vndb_search_brief`].
+/// Just enough to identify and label each entry in a paginator before its
+/// full record is fetched.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct VndbBrief {
+    pub id: String,
+    pub title: String,
+    pub alttitle: Option<String>,
+    pub released: Option<String>,
+}
+
+impl VndbBrief {
+    pub fn display_title(&self) -> &str {
+        if self.title.is_empty() {
+            self.alttitle.as_deref().unwrap_or("(no title)")
+        } else {
+            &self.title
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("https://vndb.org/{}", self.id)
+    }
+}
+
 impl Requester {
-    /// Title search — returns up to `limit` matches (VNDB caps at 100).
+    /// Lightweight title search — `id`, `title`, `alttitle`, `released`
+    /// only. The multi-result paginator hydrates each entry on demand via
+    /// [`Requester::vndb_by_id`] when the user lands on it.
+    pub async fn vndb_search_brief(&self, query: &str, limit: u32) -> Result<Vec<VndbBrief>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Err(Error::Invalid("empty query".into()));
+        }
+        let limit = limit.clamp(1, 25);
+        let body = json!({
+            "filters": ["search", "=", q],
+            "fields": "id,title,alttitle,released",
+            "results": limit,
+            "sort": "searchrank",
+        });
+        let resp = self.http.post(VN_URL).json(&body).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let message = resp.text().await.unwrap_or_default();
+            return Err(Error::Api { status: status.as_u16(), message });
+        }
+        let parsed: BriefListResponse = resp
+            .json()
+            .await
+            .map_err(|e| Error::Decode(e.to_string()))?;
+        Ok(parsed.results)
+    }
+
+    /// Full-fidelity title search. Prefer
+    /// [`Requester::vndb_search_brief`] + per-result
+    /// [`Requester::vndb_by_id`] for paginated UIs — this is here for code
+    /// that genuinely wants every match's body up front.
     pub async fn vndb_search(&self, query: &str, limit: u32) -> Result<Vec<VndbVn>> {
         let q = query.trim();
         if q.is_empty() {

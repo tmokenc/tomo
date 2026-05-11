@@ -419,7 +419,15 @@ fn parse_prefix(bot: &Bot, msg: &Message) -> Option<(String, String)> {
 }
 
 fn try_prefix<'a>(content: &'a str, prefix: &'a str) -> Option<&'a str> {
-    if !prefix.is_empty() && content.starts_with(prefix) {
+    // ASCII-case-insensitive — typing `Tomo>help`, `TOMO>help`, or
+    // `tomo>HELP` all dispatch the same. Prefixes themselves are typically
+    // ASCII; for non-ASCII prefixes the comparison falls back to exact
+    // string-equality on the leading slice (still safe, just stricter).
+    if prefix.is_empty() {
+        return None;
+    }
+    let head = content.get(..prefix.len())?;
+    if head.eq_ignore_ascii_case(prefix) {
         Some(prefix)
     } else {
         None
@@ -565,5 +573,37 @@ async fn build_gemini(config: &Config) -> Option<GeminiContext> {
         conversations,
         rate_limit,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::try_prefix;
+
+    #[test]
+    fn matches_exact_prefix() {
+        assert_eq!(try_prefix("tomo>help", "tomo>"), Some("tomo>"));
+    }
+
+    #[test]
+    fn matches_case_insensitive_prefix() {
+        assert_eq!(try_prefix("Tomo>help", "tomo>"), Some("tomo>"));
+        assert_eq!(try_prefix("TOMO>HELP", "tomo>"), Some("tomo>"));
+        assert_eq!(try_prefix("tOmO>help", "tomo>"), Some("tomo>"));
+    }
+
+    #[test]
+    fn rejects_wrong_prefix() {
+        assert_eq!(try_prefix("foo>help", "tomo>"), None);
+    }
+
+    #[test]
+    fn rejects_short_content() {
+        assert_eq!(try_prefix("tom", "tomo>"), None);
+    }
+
+    #[test]
+    fn rejects_empty_prefix() {
+        assert_eq!(try_prefix("anything", ""), None);
+    }
 }
 
