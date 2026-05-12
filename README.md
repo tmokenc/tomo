@@ -33,18 +33,22 @@ hot-reloadable scripts.
   `twilight-cache-inmemory` backed by the same `tomo-db` KvStore. Hot
   state lives in DashMaps for sync access; every mutation ships to a
   background writer that batches into fjall. Survives restarts.
-- **Gemini integration** — when a non-bot user `@`-mentions Tomo (or
-  replies to its messages), the bot asks Gemini and posts the answer.
-  Features: model fallback chain with per-model 429 cooldowns, per-request
-  context (server/channel/topic, replied-message excerpt, OCR of nearby
-  images), per-user rate-limit, per-channel short-term memory, once-per-day
-  owner DM when every model in the chain is exhausted.
+- **LLM integration (multi-provider)** — when a non-bot user `@`-mentions
+  Tomo (or replies to its messages), the bot asks an LLM and posts the
+  answer. The router rotates across **Gemini, Groq, Cerebras, OpenRouter,
+  Mistral** — set whichever API keys you have and stacking is free
+  (Gemini + Groq + Cerebras together = ~16K free requests/day). Per
+  (provider, model) 429 cooldowns parse the upstream's `retryDelay` hint;
+  non-quota errors short-circuit. Includes per-request context
+  (server/channel/topic, replied-message excerpt, OCR of nearby images),
+  per-user rate-limit, per-channel short-term memory, and a once-per-day
+  owner DM when every entry in the chain is exhausted.
 - **OCR (PaddleOCR via MNN)** — `tomo>ocr` extracts text from attached
   images. Optionally configure both the Latin and CJK engines to cover
   English / Czech / Vietnamese / Chinese / Japanese in one pass.
 - **QR codes** — `tomo>qr <text>` encodes, `tomo>qr` on an attached
   image decodes.
-- **Statistics** — every command, message, and Gemini call is counted in
+- **Statistics** — every command, message, and LLM call is counted in
   the embedded LSM-tree DB (fjall, swappable via the `tomo_db::KvStore`
   trait).
 - **Service framework** — the binary launches a `Vec<Box<dyn Service>>`.
@@ -68,7 +72,8 @@ tomo/
     ├── embed/             Embed2 builder + Embedable trait
     ├── pagination/        Paginator + PageSource (sync + lazy)
     ├── stats/             event counters via KvStore
-    ├── gemini/            Gemini REST client with model fallback + cooldowns
+    ├── llm/               Multi-provider LLM router (Gemini, Groq, Cerebras,
+    │                      OpenRouter, Mistral) with per-(provider, model) cooldowns
     ├── requester/         outbound HTTP — booru, ehentai, kanji, nhentai,
     │                      urban, vndb, anilist
     ├── scripting/         Rhai engine, hot-reload, script + trigger registries
@@ -82,7 +87,7 @@ tomo/
 
 | Service          | Purpose                                                    |
 | ---------------- | ---------------------------------------------------------- |
-| `DiscordService` | Gateway, commands, triggers, gemini mention handler        |
+| `DiscordService` | Gateway, commands, triggers, LLM mention handler           |
 | `RpcService`     | gRPC control plane backed by `BotState`                    |
 | `AdminService`   | Web UI (Yew) + OAuth + REST API; gRPC client of the bot    |
 
@@ -117,7 +122,8 @@ git clone https://github.com/tmokenc/tomo
 cd tomo
 cp .env.example .env
 # put your Discord token in DISCORD_TOKEN
-# (optional) put a Gemini key in GEMINI_API_KEY
+# (optional) put one or more LLM provider keys: GEMINI_API_KEY,
+# GROQ_API_KEY, CEREBRAS_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY
 
 # 1. Just the bot:
 cargo run --release
@@ -147,35 +153,51 @@ browser.
 
 ### Required env vars
 
-| Variable                | Default                    | Notes                                                  |
-| ----------------------- | -------------------------- | ------------------------------------------------------ |
-| `DISCORD_TOKEN`         | *required*                 | Bot token                                              |
-| `TOMO_PREFIX`           | `tomo>`                    | Prefix for prefix-style commands (case-insensitive)    |
-| `TOMO_MASTER_PREFIX`    | `%`                        | Owner-only prefix                                      |
-| `TOMO_OWNERS`           | *app owner*                | Comma-separated user IDs                               |
-| `TOMO_DATA_DIR`         | `./data`                   | fjall database directory                               |
-| `TOMO_SCRIPT_DIR`       | `./scripts`                | Where to look for Rhai scripts                         |
-| `GEMINI_API_KEY`        | *disables Gemini if unset* |                                                        |
-| `GEMINI_MODEL`          | *flash chain*              | Comma-separated fallback chain (see below)             |
-| `TOMO_OCR_*`            | *disables OCR if unset*    | Paths to PaddleOCR model files (latin / cjk pairs)     |
+| Variable                | Default                 | Notes                                                  |
+| ----------------------- | ----------------------- | ------------------------------------------------------ |
+| `DISCORD_TOKEN`         | *required*              | Bot token                                              |
+| `TOMO_PREFIX`           | `tomo>`                 | Prefix for prefix-style commands (case-insensitive)    |
+| `TOMO_MASTER_PREFIX`    | `%`                     | Owner-only prefix                                      |
+| `TOMO_OWNERS`           | *app owner*             | Comma-separated user IDs                               |
+| `TOMO_DATA_DIR`         | `./data`                | fjall database directory                               |
+| `TOMO_SCRIPT_DIR`       | `./scripts`             | Where to look for Rhai scripts                         |
+| `*_API_KEY`             | *disables LLM if unset* | One per provider: `GEMINI`, `GROQ`, `CEREBRAS`, `OPENROUTER`, `MISTRAL` |
+| `*_MODEL`               | *sensible defaults*     | Per-provider model list (comma-separated)              |
+| `LLM_PROVIDERS`         | *all configured*        | Provider priority, comma-separated                     |
+| `LLM_CHAIN`             | *unset*                 | Power-user override: flat `provider:model,...` chain   |
+| `TOMO_OCR_*`            | *disables OCR if unset* | Paths to PaddleOCR model files (latin / cjk pairs)     |
 
-#### Gemini model fallback
+#### LLM provider chain
 
-`GEMINI_MODEL` accepts a comma-separated chain. The bot tries each model
-in order; on a `429` (rate limit) it parses Google's `RetryInfo.retryDelay`
-and parks that model for the cooldown, falling through to the next entry.
-Defaults to the free-tier ladder (verified against
-[Google's pricing page](https://ai.google.dev/gemini-api/docs/pricing)):
+The bot's `@`-mention handler runs through a multi-provider router. Set
+any of `GEMINI_API_KEY`, `GROQ_API_KEY`, `CEREBRAS_API_KEY`,
+`OPENROUTER_API_KEY`, `MISTRAL_API_KEY` and the router will rotate through
+them on 429. Stacking Gemini + Groq + Cerebras gives ~16K combined free
+requests/day.
 
-```
-GEMINI_MODEL=gemini-2.5-flash,gemini-3-flash-preview,gemini-2.5-flash-lite,gemini-2.5-pro
-```
+Two levels of priority control:
 
-Run `tomo>gemini` (owner-only) to see the chain state, including any
-models currently in cooldown.
+* **Simple:** `LLM_PROVIDERS=gemini,groq,cerebras` orders providers, and
+  each `<PROVIDER>_MODEL` is a comma-separated chain within that provider.
+* **Power-user:** `LLM_CHAIN=gemini:flash,groq:llama-3.3-70b,gemini:pro`
+  is a flat chain that beats both — useful when you want to interleave
+  providers explicitly.
+
+Run `tomo>llm` (owner-only, alias `tomo>gemini`) to see the chain state,
+including which entries are currently in cooldown after a 429.
+
+Indicative free-tier quotas (verified 2026-05):
+
+| Provider   | Quota                          | Default models                                      |
+|------------|--------------------------------|-----------------------------------------------------|
+| Gemini     | 5-15 RPM × 100-1000 RPD/model  | `gemini-2.5-flash`, `gemini-3-flash-preview`, …     |
+| Groq       | 30 RPM × **14.4K RPD**         | `llama-3.3-70b-versatile`, `llama-3.1-8b-instant`   |
+| Cerebras   | ~1.7K RPD, 60K tok/min         | `llama-3.3-70b`, `llama3.1-8b`                      |
+| OpenRouter | 20 RPM × 200 RPD on `:free`    | `meta-llama/llama-3.3-70b-instruct:free`, …         |
+| Mistral    | 1B tok/month, 2 RPM            | `mistral-small-latest`, `open-mistral-nemo`         |
 
 See `.env.example` for the full list of toggles
-(`TOMO_ENABLE_PREFIX/SLASH/GEMINI/AUTO_TRIGGERS/HOT_RELOAD`,
+(`TOMO_ENABLE_PREFIX/SLASH/LLM/AUTO_TRIGGERS/HOT_RELOAD`,
 `TOMO_REGISTER_GLOBAL`, `TOMO_GALLERY_LOOKUP_WAIT_SECS`, the OCR model
 paths, RPC/admin/OAuth configuration).
 

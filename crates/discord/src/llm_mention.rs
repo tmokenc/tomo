@@ -10,7 +10,7 @@ use twilight_model::id::Id;
 use twilight_model::id::marker::UserMarker;
 
 use tomo_core::error::Result;
-use tomo_gemini::{GenerateError, Role, Turn};
+use tomo_llm::{GenerateError, Role, Turn};
 
 use crate::state::Bot;
 
@@ -41,7 +41,7 @@ pub fn should_respond(message: &Message, bot: &Bot) -> bool {
         info!(
             user = %message.author.id,
             channel = %message.channel_id,
-            "gemini mention: matched via mentions[]"
+            "llm mention: matched via mentions[]"
         );
         return true;
     }
@@ -56,7 +56,7 @@ pub fn should_respond(message: &Message, bot: &Bot) -> bool {
         info!(
             user = %message.author.id,
             channel = %message.channel_id,
-            "gemini mention: matched via content scan"
+            "llm mention: matched via content scan"
         );
         return true;
     }
@@ -69,7 +69,7 @@ pub fn should_respond(message: &Message, bot: &Bot) -> bool {
                     info!(
                         user = %message.author.id,
                         channel = %message.channel_id,
-                        "gemini mention: matched via role mention"
+                        "llm mention: matched via role mention"
                     );
                     return true;
                 }
@@ -83,7 +83,7 @@ pub fn should_respond(message: &Message, bot: &Bot) -> bool {
             info!(
                 user = %message.author.id,
                 channel = %message.channel_id,
-                "gemini mention: matched via reply-to-bot"
+                "llm mention: matched via reply-to-bot"
             );
             return true;
         }
@@ -96,7 +96,7 @@ pub fn should_respond(message: &Message, bot: &Bot) -> bool {
         mentions = message.mentions.len(),
         role_mentions = message.mention_roles.len(),
         reply = message.referenced_message.is_some(),
-        "gemini mention: no match (not responding)"
+        "llm mention: no match (not responding)"
     );
     false
 }
@@ -128,28 +128,28 @@ fn mentions_in_content(content: &str, bot_uid: u64) -> bool {
 }
 
 pub async fn handle(bot: Bot, message: Message) -> Result<()> {
-    let Some(gemini) = bot.gemini.clone() else {
-        debug!("gemini mention ignored: client not configured");
+    let Some(llm) = bot.llm.clone() else {
+        debug!("llm mention ignored: router not configured");
         return Ok(());
     };
 
-    if !gemini.rate_limit.check(message.author.id) {
-        debug!(user = %message.author.id, "gemini rate-limit hit");
+    if !llm.rate_limit.check(message.author.id) {
+        debug!(user = %message.author.id, "llm rate-limit hit");
         return Ok(());
     }
 
     let user_text = strip_self_mention(&message.content, bot.identity.user_id.get());
     if user_text.trim().is_empty() {
-        debug!("gemini mention with no content after stripping the bot mention");
+        debug!("llm mention with no content after stripping the bot mention");
         return Ok(());
     }
 
     // Build the request history WITHOUT mutating the store yet. We only
     // commit a User+Model pair on a successful response, otherwise a failed
     // mention leaves a hanging user turn that breaks the next request.
-    let prior = gemini.conversations.snapshot(message.channel_id);
+    let prior = llm.conversations.snapshot(message.channel_id);
     let mut request_turns =
-        trim_for_request(prior, gemini.client.config().context_messages.saturating_sub(1));
+        trim_for_request(prior, llm.router.context_messages.saturating_sub(1));
     request_turns.push(Turn { role: Role::User, text: user_text.clone() });
 
     let mut extra_context = build_context(&bot, &message);
@@ -159,17 +159,18 @@ pub async fn handle(bot: Bot, message: Message) -> Result<()> {
     }
     debug!(
         chars = extra_context.len(),
-        "gemini: appending per-request context to system prompt"
+        "llm: appending per-request context to system prompt"
     );
 
     // Typing indicator while we wait on the model.
     let _ = bot.http.create_typing_trigger(message.channel_id).await;
 
-    let response = match gemini.client.generate(&request_turns, Some(&extra_context)).await {
+    let response = match llm.router.generate(&request_turns, Some(&extra_context)).await {
         Ok(r) => r,
-        Err(GenerateError::QuotaExceeded) => {
-            // Silent to the user — only the operators see this.
-            debug!("gemini quota exhausted; staying silent");
+        Err(GenerateError::QuotaExceeded { .. }) => {
+            // Every provider/model in the chain is currently cooled-down or
+            // just 429'd. Silent to the user; loud to operators once a day.
+            debug!("llm quota exhausted across all providers; staying silent");
             maybe_alert_quota(&bot).await;
             return Ok(());
         }
@@ -177,25 +178,37 @@ pub async fn handle(bot: Bot, message: Message) -> Result<()> {
             // Non-quota errors used to be silent — that left users staring at
             // a no-op @-mention. We still don't echo internals, but we log
             // loudly and react with ⚠ so it's visible something failed.
-            warn!(error = %e, user = %message.author.id, "gemini generate failed");
+            warn!(error = %e, user = %message.author.id, "llm generate failed");
             react_warn(&bot, &message).await;
             return Ok(());
         }
     };
 
     if response.text.trim().is_empty() {
-        // Empty candidates list — most commonly the safety filter triggered.
-        // Same treatment as a hard error: visible signal, no echo.
-        warn!(user = %message.author.id, "gemini returned no text (likely safety filtered)");
+        // Empty content (safety filter, refusal, …). Same treatment as a
+        // hard error: visible signal, no echo.
+        warn!(
+            user = %message.author.id,
+            provider = %response.provider_used,
+            model = %response.model_used,
+            "llm returned no text (likely safety filtered)"
+        );
         react_warn(&bot, &message).await;
         return Ok(());
     }
 
+    info!(
+        provider = %response.provider_used,
+        model = %response.model_used,
+        prompt_tokens = response.prompt_tokens,
+        output_tokens = response.output_tokens,
+        "llm: served mention"
+    );
+
     // Persist both turns now that we have a real reply.
-    gemini
-        .conversations
+    llm.conversations
         .push(message.channel_id, Turn { role: Role::User, text: user_text });
-    gemini.conversations.push(
+    llm.conversations.push(
         message.channel_id,
         Turn { role: Role::Model, text: response.text.clone() },
     );
@@ -214,7 +227,7 @@ pub async fn handle(bot: Bot, message: Message) -> Result<()> {
             req = req.reply(message.id);
         }
         if let Err(e) = req.await {
-            warn!(error = %e, "send gemini reply");
+            warn!(error = %e, "send llm reply");
             break;
         }
     }
@@ -256,16 +269,16 @@ async fn react_warn(bot: &Bot, message: &Message) {
 }
 
 /// DM each bot owner if today is the first quota hit we've seen. Atomic CAS
-/// on `BotState::gemini_quota_alert_day` ensures only one DM goes out per
+/// on `BotState::llm_quota_alert_day` ensures only one DM goes out per
 /// UTC day even under concurrent quota errors.
 async fn maybe_alert_quota(bot: &Bot) {
     let today = chrono::Utc::now().date_naive().num_days_from_ce() as i64;
-    let prev = bot.gemini_quota_alert_day.load(Ordering::Acquire);
+    let prev = bot.llm_quota_alert_day.load(Ordering::Acquire);
     if prev == today {
         return;
     }
     if bot
-        .gemini_quota_alert_day
+        .llm_quota_alert_day
         .compare_exchange(prev, today, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
@@ -397,7 +410,7 @@ async fn build_ocr_context(bot: &Bot, message: &Message) -> Option<String> {
     let bytes = match crate::util::fetch_image_bytes(bot, &url).await {
         Ok(b) => b,
         Err(e) => {
-            debug!(url, error = %e, "gemini: image fetch for OCR failed");
+            debug!(url, error = %e, "llm: image fetch for OCR failed");
             return None;
         }
     };
@@ -409,11 +422,11 @@ async fn build_ocr_context(bot: &Bot, message: &Message) -> Option<String> {
     let text = match tokio::time::timeout(std::time::Duration::from_secs(8), ocr_fut).await {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => {
-            debug!(url, error = %e, "gemini: OCR failed");
+            debug!(url, error = %e, "llm: OCR failed");
             return None;
         }
         Err(_) => {
-            debug!(url, "gemini: OCR timed out — skipping");
+            debug!(url, "llm: OCR timed out — skipping");
             return None;
         }
     };

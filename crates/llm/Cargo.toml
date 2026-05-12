@@ -1,5 +1,5 @@
 [package]
-name = "tomo-gemini"
+name = "tomo-llm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 tomo-core = { workspace = true }
 
+async-trait    = { workspace = true }
 dashmap        = { workspace = true }
 reqwest        = { workspace = true }
 serde          = { workspace = true }

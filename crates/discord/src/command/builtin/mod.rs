@@ -13,11 +13,11 @@ use crate::command::Command;
 mod anime;
 mod booru;
 mod ehentai;
-mod gemini;
 mod help;
 mod info;
 mod invite;
 mod kanji;
+mod llm;
 mod nhentai;
 mod ocr;
 mod ping;
@@ -59,6 +59,6 @@ pub fn all() -> Vec<Arc<dyn Command>> {
         boxed(top::TopCommand),
         // — Admin —
         boxed(reload::ReloadCommand),
-        boxed(gemini::GeminiCommand),
+        boxed(llm::LlmCommand),
     ]
 }

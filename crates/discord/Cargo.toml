@@ -13,7 +13,7 @@ tomo-cache      = { workspace = true, features = ["permission-calculator"] }
 tomo-embed      = { workspace = true }
 tomo-pagination = { workspace = true }
 tomo-stats      = { workspace = true }
-tomo-gemini     = { workspace = true }
+tomo-llm        = { workspace = true }
 tomo-scripting  = { workspace = true }
 tomo-requester  = { workspace = true }
 tomo-rpc        = { workspace = true }

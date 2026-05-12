@@ -2,7 +2,7 @@
 //! every enabled service concurrently.
 //!
 //! Services launched today:
-//! * [`tomo_discord::DiscordService`] — gateway, commands, triggers, gemini.
+//! * [`tomo_discord::DiscordService`] — gateway, commands, triggers, LLM router.
 //! * [`tomo_discord::RpcService`]    — gRPC control plane.
 //! * [`tomo_admin::AdminService`]    — axum-based web UI for owners.
 //!
@@ -27,14 +27,31 @@ use tomo_discord::{DiscordService, RpcConfig, RpcService};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
+    // Load `.env` *before* tracing init so `RUST_LOG` set in `.env` is
+    // visible to `EnvFilter::try_from_default_env`. Without this the
+    // subscriber initialises before dotenvy has populated env vars and
+    // falls back to its hard-coded default; the `.env`-supplied
+    // `RUST_LOG` wouldn't apply until later code that's invisible (no
+    // tracing yet to observe it).
+    let dotenv_outcome = dotenvy::dotenv();
+
     init_tracing();
+
+    match &dotenv_outcome {
+        Ok(path) => info!(path = %path.display(), "loaded .env"),
+        Err(e) if e.not_found() => warn!(
+            cwd = ?env::current_dir().ok(),
+            "no .env file found — relying on process environment only"
+        ),
+        Err(e) => warn!(error = %e, "failed to load .env"),
+    }
 
     let config = Arc::new(Config::from_env().context("loading configuration")?);
     info!(
         prefix = %config.discord.prefix,
         data_dir = ?config.data_dir,
         script_dir = ?config.script_dir,
-        gemini = config.gemini.is_some(),
+        llm = config.llm.is_some(),
         "tomo starting"
     );
 

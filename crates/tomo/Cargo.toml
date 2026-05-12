@@ -17,6 +17,7 @@ tomo-discord = { workspace = true }
 tomo-admin   = { workspace = true }
 
 anyhow             = { workspace = true }
+dotenvy            = { workspace = true }
 tokio              = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }

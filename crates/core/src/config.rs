@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub discord: DiscordConfig,
-    pub gemini: Option<GeminiConfig>,
+    pub llm: Option<LlmConfig>,
     pub ocr: Option<OcrConfig>,
     /// Directory the database backend lives in. Created on first run.
     pub data_dir: PathBuf,
@@ -59,7 +59,7 @@ pub struct DiscordConfig {
     pub activity: Option<String>,
     pub enable_prefix: bool,
     pub enable_slash: bool,
-    pub enable_gemini: bool,
+    pub enable_llm: bool,
     pub enable_auto_triggers: bool,
     pub register_global: bool,
     pub dev_guild: Option<Id<GuildMarker>>,
@@ -68,51 +68,49 @@ pub struct DiscordConfig {
     pub gallery_lookup_wait_secs: u64,
 }
 
+/// Top-level LLM config — a flat ordered chain of (provider, model) entries
+/// the router walks. Each entry knows which API key to use via the
+/// provider-specific key in [`LlmConfig::api_keys`].
+///
+/// Configured from env via two complementary controls:
+///   * the simple path — `LLM_PROVIDERS` (provider priority) × per-provider
+///     `*_MODEL` lists (model priority within a provider);
+///   * the power-user path — a flat `LLM_CHAIN=provider:model,...` that lets
+///     you interleave providers (e.g., `groq:fast,gemini:flash,groq:slow`).
+///
+/// If both are set, `LLM_CHAIN` wins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeminiConfig {
-    pub api_key: String,
-    /// Ordered list of Gemini model IDs. The client tries them in order and
-    /// rotates to the next one when the active model returns a 429. Use the
-    /// free-tier ladder (Flash → Flash-Lite, etc.) to keep responding while
-    /// the busy quota recovers.
-    pub models: Vec<String>,
+pub struct LlmConfig {
+    pub chain: Vec<LlmChainEntry>,
+    /// `provider_name -> api_key`. Entries in `chain` referencing a missing
+    /// key are filtered out at router build time.
+    pub api_keys: std::collections::HashMap<String, String>,
     pub context_messages: usize,
     pub max_output_tokens: u32,
     pub rate_limit_per_minute: u32,
     pub system_prompt: String,
 }
 
-impl GeminiConfig {
-    /// The model the client prefers — first in the chain. Always present
-    /// because `from_env` rejects empty chains.
-    pub fn primary_model(&self) -> &str {
-        self.models
-            .first()
-            .map(String::as_str)
-            .unwrap_or("gemini-2.5-flash")
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmChainEntry {
+    /// Lower-case provider id: `gemini`, `groq`, `cerebras`, `openrouter`, `mistral`.
+    pub provider: String,
+    pub model: String,
+}
+
+impl LlmConfig {
+    /// The model the router will try first — useful for the startup health-log
+    /// line that confirms which model gets the "primary" slot.
+    pub fn primary(&self) -> Option<&LlmChainEntry> {
+        self.chain.first()
     }
 }
 
 impl Config {
-    /// Load `.env` (if present) and parse environment variables.
-    ///
-    /// `dotenvy::dotenv()` walks up from the *current working directory*
-    /// looking for a `.env` file. We log which file (if any) it found so
-    /// "I have it in .env but the bot says it's missing" is diagnosable from
-    /// the startup output — the usual cause is running the binary from a
-    /// directory above (or below) where the `.env` lives.
+    /// Parse environment variables. The caller is expected to have already
+    /// loaded `.env` (so `RUST_LOG` is visible to the tracing subscriber
+    /// before it initialises) — see `tomo/src/main.rs`.
     pub fn from_env() -> Result<Self> {
-        match dotenvy::dotenv() {
-            Ok(path) => tracing::info!(path = %path.display(), "loaded .env"),
-            Err(e) if e.not_found() => {
-                tracing::warn!(
-                    cwd = ?env::current_dir().ok(),
-                    "no .env file found — relying on process environment only"
-                );
-            }
-            Err(e) => tracing::warn!(error = %e, "failed to load .env"),
-        }
-
         let token = require("DISCORD_TOKEN")?;
         let prefix = optional("TOMO_PREFIX").unwrap_or_else(|| "tomo>".into());
         let master_prefix = optional("TOMO_MASTER_PREFIX").unwrap_or_else(|| "%".into());
@@ -141,7 +139,7 @@ impl Config {
             activity,
             enable_prefix: bool_env("TOMO_ENABLE_PREFIX", true),
             enable_slash: bool_env("TOMO_ENABLE_SLASH", true),
-            enable_gemini: bool_env("TOMO_ENABLE_GEMINI", true),
+            enable_llm: bool_env("TOMO_ENABLE_LLM", true),
             enable_auto_triggers: bool_env("TOMO_ENABLE_AUTO_TRIGGERS", true),
             register_global: bool_env("TOMO_REGISTER_GLOBAL", false),
             dev_guild,
@@ -156,67 +154,10 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("./scripts"));
         let enable_hot_reload = bool_env("TOMO_ENABLE_HOT_RELOAD", true);
 
-        let gemini = if discord.enable_gemini {
-            // Explicit diagnostics here because "I have it in .env but the
-            // bot says it's missing" comes up a lot when the var is set but
-            // the dotenv file isn't on the search path the binary runs from,
-            // or the value is quoted/whitespaced into uselessness.
-            match env::var("GEMINI_API_KEY") {
-                Ok(raw) if !raw.trim().is_empty() => {
-                    // Free-tier fallback chain (verified against
-                    // ai.google.dev/gemini-api/docs/pricing on 2026-05-11).
-                    // Indicative free-tier RPM × RPD:
-                    //   gemini-2.5-flash         10 ×  250
-                    //   gemini-3-flash-preview   10 ×  100  (preview)
-                    //   gemini-2.5-flash-lite    15 × 1000  (most permissive)
-                    //   gemini-2.5-pro            5 ×  100  (slowest, smartest)
-                    // Order: quality first, fall back to the high-quota lite,
-                    // last resort the slow Pro. User-overridable via env.
-                    let models = optional("GEMINI_MODEL")
-                        .map(|raw| {
-                            raw.split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect::<Vec<_>>()
-                        })
-                        .filter(|v| !v.is_empty())
-                        .unwrap_or_else(|| {
-                            vec![
-                                "gemini-2.5-flash".into(),
-                                "gemini-3-flash-preview".into(),
-                                "gemini-2.5-flash-lite".into(),
-                                "gemini-2.5-pro".into(),
-                            ]
-                        });
-                    Some(GeminiConfig {
-                        api_key: raw.trim().to_string(),
-                        models,
-                        context_messages: parse_env("GEMINI_CONTEXT_MESSAGES", 10),
-                        max_output_tokens: parse_env("GEMINI_MAX_OUTPUT_TOKENS", 1024),
-                        rate_limit_per_minute: parse_env("GEMINI_RATE_LIMIT", 6),
-                        system_prompt: optional("GEMINI_SYSTEM_PROMPT").unwrap_or_else(|| {
-                            "You are Tomo, a helpful Discord bot. Reply concisely.".into()
-                        }),
-                    })
-                }
-                Ok(raw) => {
-                    tracing::warn!(
-                        "GEMINI_API_KEY is set but empty/whitespace ({} bytes) — gemini disabled",
-                        raw.len()
-                    );
-                    None
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "GEMINI_API_KEY not present in environment — gemini disabled. \
-                         (Loaded vars start with: {})",
-                        env::vars().map(|(k, _)| k).filter(|k| k.starts_with("GEMINI_")).collect::<Vec<_>>().join(", ")
-                    );
-                    None
-                }
-            }
+        let llm = if discord.enable_llm {
+            build_llm_config()
         } else {
-            tracing::info!("TOMO_ENABLE_GEMINI is false — gemini disabled by config");
+            tracing::info!("TOMO_ENABLE_LLM is false — LLM responses disabled by config");
             None
         };
 
@@ -229,13 +170,197 @@ impl Config {
 
         Ok(Self {
             discord,
-            gemini,
+            llm,
             ocr,
             data_dir,
             script_dir,
             enable_hot_reload,
         })
     }
+}
+
+// ---------- LLM config helpers ----------
+
+/// Known providers and which env var holds their API key. Order here is
+/// also the *default* priority order when neither `LLM_CHAIN` nor
+/// `LLM_PROVIDERS` is set — Gemini first because it's the historical
+/// default; high-quota providers (Groq, Cerebras) right behind it for
+/// rotation; OpenRouter / Mistral last because their free quotas are
+/// tighter.
+const KNOWN_PROVIDERS: &[(&str, &str, &str)] = &[
+    // (provider name, api key env, default-model env)
+    ("gemini", "GEMINI_API_KEY", "GEMINI_MODEL"),
+    ("groq", "GROQ_API_KEY", "GROQ_MODEL"),
+    ("cerebras", "CEREBRAS_API_KEY", "CEREBRAS_MODEL"),
+    ("openrouter", "OPENROUTER_API_KEY", "OPENROUTER_MODEL"),
+    ("mistral", "MISTRAL_API_KEY", "MISTRAL_MODEL"),
+];
+
+/// Default models per provider when the user hasn't set `<PROVIDER>_MODEL`.
+/// All are free-tier as of 2026-05.
+fn default_models_for(provider: &str) -> Vec<String> {
+    match provider {
+        "gemini" => vec![
+            // ai.google.dev/gemini-api/docs/pricing — free tier:
+            // flash (10 RPM × 250 RPD) → 3-flash-preview → flash-lite
+            // (15 RPM × 1000 RPD, highest quota) → pro (5 RPM × 100 RPD).
+            "gemini-2.5-flash".into(),
+            "gemini-3-flash-preview".into(),
+            "gemini-2.5-flash-lite".into(),
+            "gemini-2.5-pro".into(),
+        ],
+        "groq" => vec![
+            // groq.com — free tier: 30 RPM × 14.4K RPD.
+            "llama-3.3-70b-versatile".into(),
+            "llama-3.1-8b-instant".into(),
+        ],
+        "cerebras" => vec![
+            // cerebras.ai — free tier: ~1.7K RPD, 60K tok/min.
+            "llama-3.3-70b".into(),
+            "llama3.1-8b".into(),
+        ],
+        "openrouter" => vec![
+            // openrouter.ai — free :free models: 20 RPM × 200 RPD.
+            // Picks verified live from /api/v1/models on 2026-05-12; ordered
+            // fast→big. The previous `google/gemini-2.0-flash-exp:free`
+            // default was removed by Google before this build.
+            "meta-llama/llama-3.3-70b-instruct:free".into(),
+            "google/gemma-4-31b-it:free".into(),
+            "qwen/qwen3-next-80b-a3b-instruct:free".into(),
+            "openai/gpt-oss-120b:free".into(),
+        ],
+        "mistral" => vec![
+            // mistral.ai — 1B tok/month, 2 RPM.
+            "mistral-small-latest".into(),
+            "open-mistral-nemo".into(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn build_llm_config() -> Option<LlmConfig> {
+    // Collect the API key for every known provider whose env var is set.
+    let mut api_keys = std::collections::HashMap::new();
+    let mut available_providers = Vec::new();
+    for (name, key_env, _) in KNOWN_PROVIDERS {
+        if let Some(key) = optional(key_env) {
+            api_keys.insert((*name).to_string(), key);
+            available_providers.push(*name);
+        }
+    }
+    if api_keys.is_empty() {
+        // Stay back-compat with the old `GEMINI_API_KEY missing` warning so
+        // existing users see exactly the same diagnostic.
+        tracing::warn!(
+            "no LLM provider API keys found in environment — LLM responses disabled. \
+             Looked for: GEMINI_API_KEY, GROQ_API_KEY, CEREBRAS_API_KEY, \
+             OPENROUTER_API_KEY, MISTRAL_API_KEY."
+        );
+        return None;
+    }
+
+    let chain = build_chain(&available_providers, &api_keys);
+    if chain.is_empty() {
+        tracing::warn!(
+            "LLM provider API keys are set but the resolved chain is empty. \
+             Check `LLM_CHAIN` / `LLM_PROVIDERS` / `*_MODEL` env vars."
+        );
+        return None;
+    }
+
+    Some(LlmConfig {
+        chain,
+        api_keys,
+        context_messages: parse_env("LLM_CONTEXT_MESSAGES", 10),
+        max_output_tokens: parse_env("LLM_MAX_OUTPUT_TOKENS", 1024),
+        rate_limit_per_minute: parse_env("LLM_RATE_LIMIT", 6),
+        system_prompt: optional("LLM_SYSTEM_PROMPT").unwrap_or_else(|| {
+            "You are Tomo, a helpful Discord bot. Reply concisely.".into()
+        }),
+    })
+}
+
+/// Build the flat (provider, model) chain from env. `LLM_CHAIN` wins when
+/// set; otherwise fall back to `LLM_PROVIDERS` × per-provider `*_MODEL`
+/// lists. Entries referencing a provider without an API key are dropped
+/// with a warning so misconfigurations are auditable from the startup log.
+fn build_chain(
+    available_providers: &[&str],
+    api_keys: &std::collections::HashMap<String, String>,
+) -> Vec<LlmChainEntry> {
+    // Power-user override: explicit flat chain.
+    if let Some(raw) = optional("LLM_CHAIN") {
+        let mut chain = Vec::new();
+        for token in raw.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            // Split on the *first* colon only — model names may contain
+            // colons themselves (OpenRouter's `:free` suffix).
+            let Some((provider, model)) = token.split_once(':') else {
+                tracing::warn!(
+                    entry = %token,
+                    "LLM_CHAIN entry has no `provider:model` separator — skipping"
+                );
+                continue;
+            };
+            let provider = provider.trim().to_ascii_lowercase();
+            let model = model.trim().to_string();
+            if !api_keys.contains_key(&provider) {
+                tracing::warn!(
+                    provider = %provider,
+                    model = %model,
+                    "LLM_CHAIN references a provider without an API key — skipping"
+                );
+                continue;
+            }
+            chain.push(LlmChainEntry { provider, model });
+        }
+        return chain;
+    }
+
+    // Simple path: provider order × per-provider model list.
+    let provider_order: Vec<String> = optional("LLM_PROVIDERS")
+        .map(|raw| {
+            raw.split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_else(|| available_providers.iter().map(|s| (*s).to_string()).collect());
+
+    let mut chain = Vec::new();
+    for provider in &provider_order {
+        if !api_keys.contains_key(provider) {
+            tracing::warn!(
+                provider = %provider,
+                "LLM_PROVIDERS lists `{provider}` but no `*_API_KEY` is set for it — skipping",
+            );
+            continue;
+        }
+        let model_env = KNOWN_PROVIDERS
+            .iter()
+            .find(|(n, _, _)| *n == provider.as_str())
+            .map(|(_, _, m)| *m);
+        let models = model_env
+            .and_then(optional)
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| default_models_for(provider));
+        for model in models {
+            chain.push(LlmChainEntry {
+                provider: provider.clone(),
+                model,
+            });
+        }
+    }
+    chain
 }
 
 fn require(key: &'static str) -> Result<String> {

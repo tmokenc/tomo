@@ -23,7 +23,7 @@ pub struct OcrSlot {
 use tomo_core::Config;
 use tomo_core::error::{Error, Result};
 use tomo_db::KvStore;
-use tomo_gemini::{ConversationStore, GeminiClient, RateLimiter};
+use tomo_llm::{ConversationStore, LlmRouter, RateLimiter};
 use tomo_requester::Requester;
 use tomo_scripting::ScriptManager;
 use tomo_stats::Stats;
@@ -32,7 +32,7 @@ use crate::command::CommandRegistry;
 use crate::trigger::TriggerRegistry;
 
 /// Cheaply-clonable handle to bot state. Every component (event loop,
-/// commands, triggers, gemini handler) takes this and only this.
+/// commands, triggers, llm handler) takes this and only this.
 pub type Bot = Arc<BotState>;
 
 /// Holds every piece of long-lived state the bot needs at runtime.
@@ -45,7 +45,7 @@ pub struct BotState {
     pub stats: Stats,
     pub scripts: Arc<ScriptManager>,
     pub requester: Requester,
-    pub gemini: Option<GeminiContext>,
+    pub llm: Option<LlmContext>,
     /// Zero, one, or two OCR engines (Latin / CJK). The `ocr` command runs
     /// every loaded engine and merges the output, so configuring both gives
     /// full coverage of en / cs / vi / zh / ja.
@@ -59,15 +59,19 @@ pub struct BotState {
     /// Sourced from `TOMO_OWNERS`, falling back to the application owner.
     pub owners: Vec<Id<UserMarker>>,
     pub started_at: DateTime<Utc>,
-    /// `chrono`'s `num_days_from_ce` of the last day we DM'd owners about a
-    /// Gemini quota error. Atomic CAS on this guarantees only one DM per
-    /// UTC day even under concurrent errors. `0` means "never alerted".
-    pub gemini_quota_alert_day: AtomicI64,
+    /// `chrono`'s `num_days_from_ce` of the last day we DM'd owners about an
+    /// LLM quota error (every provider in the chain refused). Atomic CAS on
+    /// this guarantees only one DM per UTC day even under concurrent
+    /// errors. `0` means "never alerted".
+    pub llm_quota_alert_day: AtomicI64,
 }
 
+/// Cached at boot, cloned by every handler that needs the router. Holds
+/// the per-channel conversation log and a per-user rate limiter alongside
+/// the multi-provider router.
 #[derive(Clone)]
-pub struct GeminiContext {
-    pub client: Arc<GeminiClient>,
+pub struct LlmContext {
+    pub router: Arc<LlmRouter>,
     pub conversations: Arc<ConversationStore>,
     pub rate_limit: Arc<RateLimiter>,
 }

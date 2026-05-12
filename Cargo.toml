@@ -7,7 +7,7 @@ members = [
     "crates/embed",
     "crates/pagination",
     "crates/stats",
-    "crates/gemini",
+    "crates/llm",
     "crates/requester",
     "crates/scripting",
     "crates/rpc",
@@ -32,7 +32,7 @@ tomo-cache      = { path = "crates/cache" }
 tomo-embed      = { path = "crates/embed" }
 tomo-pagination = { path = "crates/pagination" }
 tomo-stats      = { path = "crates/stats" }
-tomo-gemini     = { path = "crates/gemini" }
+tomo-llm        = { path = "crates/llm" }
 tomo-scripting  = { path = "crates/scripting" }
 tomo-requester  = { path = "crates/requester" }
 tomo-rpc        = { path = "crates/rpc" }

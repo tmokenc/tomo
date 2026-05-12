@@ -20,7 +20,7 @@ use twilight_standby::Standby;
 
 use tomo_core::{Config, Result as CoreResult, Service};
 use tomo_db::KvStore;
-use tomo_gemini::{ConversationStore, GeminiClient, RateLimiter};
+use tomo_llm::{ConversationStore, LlmRouter, RateLimiter};
 use tomo_scripting::ScriptManager;
 use tomo_stats::{CommandKind, Stats};
 
@@ -29,9 +29,9 @@ use crate::command::context::{CommandContext, InvocationSource};
 use crate::command::registry::{publish_slash, CommandRegistry};
 use crate::command::script::ScriptCommandAdapter;
 use crate::command::{Command, DynCommand};
-use crate::gemini_mention;
+use crate::llm_mention;
 use crate::intents::{event_types, intents};
-use crate::state::{Bot, BotIdentity, BotState, GeminiContext};
+use crate::state::{Bot, BotIdentity, BotState, LlmContext};
 use crate::trigger::{default_builtin as default_triggers, TriggerRegistry};
 
 /// Long-running Discord service.
@@ -83,7 +83,7 @@ impl DiscordService {
             warn!(error = %e, "initial script load");
         }
 
-        let gemini = build_gemini(&config).await;
+        let llm = build_llm(&config).await;
         let requester = tomo_requester::Requester::new()
             .map_err(|e| tomo_core::Error::config(format!("requester: {e}")))?;
         let ocr = build_ocr(&config);
@@ -97,14 +97,14 @@ impl DiscordService {
             stats,
             scripts: Arc::clone(&scripts),
             requester,
-            gemini,
+            llm,
             ocr,
             commands: Arc::new(ArcSwap::from_pointee(CommandRegistry::new())),
             triggers: Arc::new(ArcSwap::from_pointee(TriggerRegistry::new())),
             identity,
             owners,
             started_at: Utc::now(),
-            gemini_quota_alert_day: std::sync::atomic::AtomicI64::new(0),
+            llm_quota_alert_day: std::sync::atomic::AtomicI64::new(0),
         });
 
         refresh_command_registry(&bot);
@@ -149,12 +149,12 @@ impl DiscordService {
             owners = bot.owners.len(),
             commands = bot.commands.load().iter_unique().count(),
             triggers = bot.triggers.load().iter_builtin().count() + bot.triggers.load().iter_script().count(),
-            gemini = bot.gemini.is_some(),
+            llm = bot.llm.is_some(),
             "bot ready"
         );
         info!(
             user_id = %id.user_id,
-            "tip: gemini mention triggers on `<@{}>` (or a reply to the bot)",
+            "tip: LLM mention triggers on `<@{}>` (or a reply to the bot)",
             id.user_id
         );
         if let Some(owner) = id.owner.as_ref() {
@@ -287,14 +287,14 @@ async fn on_message(bot: Bot, ev: MessageCreate) {
         registry.dispatch(&bot, &message).await;
     }
 
-    // 3) Gemini mention.
-    if bot.config.discord.enable_gemini
-        && bot.gemini.is_some()
-        && gemini_mention::should_respond(&message, &bot)
+    // 3) LLM mention (Gemini + any other rotating provider).
+    if bot.config.discord.enable_llm
+        && bot.llm.is_some()
+        && llm_mention::should_respond(&message, &bot)
     {
         tokio::spawn(async move {
-            if let Err(e) = gemini_mention::handle(bot, message).await {
-                warn!(error = %e, "gemini mention");
+            if let Err(e) = llm_mention::handle(bot, message).await {
+                warn!(error = %e, "llm mention");
             }
         });
     }
@@ -516,60 +516,44 @@ fn build_ocr(config: &Config) -> Vec<crate::state::OcrSlot> {
     out
 }
 
-async fn build_gemini(config: &Config) -> Option<GeminiContext> {
-    let Some(cfg) = config.gemini.clone() else {
-        // tomo-core already logged the precise reason (`TOMO_ENABLE_GEMINI`
-        // off, key missing, or key empty) when it parsed the env. Nothing
-        // useful to add here; just confirm the state at the discord layer.
-        info!("gemini: disabled (see tomo-core config logs above for the reason)");
+/// Build the multi-provider router from the parsed config. Returns `None`
+/// when LLM responses should stay off (no key for any provider, or
+/// `TOMO_ENABLE_LLM=false`).
+async fn build_llm(config: &Config) -> Option<LlmContext> {
+    let Some(cfg) = config.llm.clone() else {
+        info!("llm: disabled (see tomo-core config logs above for the reason)");
         return None;
     };
-    if cfg.api_key.trim().is_empty() {
-        warn!("gemini: disabled — `GEMINI_API_KEY` is empty");
-        return None;
-    }
-    let models = cfg.models.clone();
-    let rate_limit = Arc::new(RateLimiter::per_minute(cfg.rate_limit_per_minute));
-    let conversations = Arc::new(ConversationStore::new(cfg.context_messages.max(2)));
-    let client = match GeminiClient::new(cfg) {
-        Ok(c) => Arc::new(c),
+
+    let context_messages = cfg.context_messages;
+    let rate_per_min = cfg.rate_limit_per_minute;
+
+    let router = match LlmRouter::from_config(cfg) {
+        Ok(r) => r,
         Err(e) => {
-            warn!(error = ?e, "gemini: client build failed — disabled");
+            warn!(error = ?e, "llm: router build failed — disabled");
             return None;
         }
     };
 
-    info!(chain = ?models, "gemini: fallback chain configured");
-
-    // Pre-flight: ask Google for the primary model's metadata. This catches
-    // the most common misconfigurations (typo'd model name, bad/expired API
-    // key, no network) at startup instead of surfacing them as silent
-    // non-responses the first time a user mentions the bot.
-    match client.health_check().await {
-        Ok(info) => {
-            info!(
-                model = %info.name,
-                display_name = %info.display_name,
-                input_token_limit = info.input_token_limit,
-                output_token_limit = info.output_token_limit,
-                "gemini: connection OK (primary model)"
-            );
-        }
-        Err(e) => {
-            warn!(
-                primary = %models.first().map(String::as_str).unwrap_or(""),
-                error = ?e,
-                "gemini: health check FAILED on primary model. Mentions will still try the chain, \
-                 but check `GEMINI_API_KEY` and `GEMINI_MODEL` if every model 404s/401s."
-            );
-            // The client is still returned: a transient outage shouldn't
-            // permanently disable the feature, and the next mention will
-            // retry. The startup log makes the failure auditable.
-        }
+    if router.is_empty() {
+        warn!("llm: resolved chain is empty after filtering — disabled");
+        return None;
     }
 
-    Some(GeminiContext {
-        client,
+    let chain_summary: Vec<String> = router
+        .entries()
+        .iter()
+        .map(|e| format!("{}/{}", e.provider.name(), e.model))
+        .collect();
+    info!(chain = ?chain_summary, "llm: fallback chain configured");
+
+    let router = Arc::new(router);
+    let conversations = Arc::new(ConversationStore::new(context_messages.max(2)));
+    let rate_limit = Arc::new(RateLimiter::per_minute(rate_per_min));
+
+    Some(LlmContext {
+        router,
         conversations,
         rate_limit,
     })

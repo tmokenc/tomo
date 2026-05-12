@@ -11,6 +11,10 @@ scripts/
 └── triggers/    one .rhai file per auto-trigger
 ```
 
+Only files with the exact `.rhai` extension load — anything else (e.g.
+`*.rhai.example`) is ignored, so disabled examples can sit alongside live
+scripts without firing. Rename `.rhai.example` → `.rhai` to enable one.
+
 ## Every script defines two functions
 
 ```rhai
@@ -102,11 +106,26 @@ ctx.reply_embed(e);
 
 ## Trigger `match` shapes
 
+`match` is a reserved keyword in Rhai, so it **must be quoted** as a map key:
+
 ```rhai
-match: #{ regex: "(?i)\\bhello\\b" }      // case-insensitive regex
-match: #{ has_image: true }               // any image attachment
-match: #{ has_attachment: true }          // any attachment
-match: #{ contains: "meow" }              // substring (case-insensitive)
-match: #{ starts_with: "!" }              // case-insensitive prefix
-match: #{ mentions_bot: true }            // user @-mentioned the bot
+fn meta() {
+    #{
+        name: "wave",
+        "match": #{ regex: "(?i)\\bhi\\b" },
+    }
+}
 ```
+
+Accepted shapes:
+
+```rhai
+"match": #{ regex: "(?i)\\bhello\\b" }    // case-insensitive regex
+"match": #{ has_image: true }             // any image attachment
+"match": #{ has_attachment: true }        // any attachment
+"match": #{ contains: "meow" }            // substring (case-insensitive)
+"match": #{ starts_with: "!" }            // case-insensitive prefix
+"match": #{ mentions_bot: true }          // user @-mentioned the bot
+```
+
+See `triggers/*.rhai.example` for working examples you can copy.

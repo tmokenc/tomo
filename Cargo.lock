@@ -4023,6 +4023,7 @@ name = "tomo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dotenvy",
  "tokio",
  "tomo-admin",
  "tomo-core",
@@ -4086,7 +4087,6 @@ name = "tomo-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "dotenvy",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -4136,7 +4136,7 @@ dependencies = [
  "tomo-core",
  "tomo-db",
  "tomo-embed",
- "tomo-gemini",
+ "tomo-llm",
  "tomo-pagination",
  "tomo-requester",
  "tomo-rpc",
@@ -4163,9 +4163,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "tomo-gemini"
+name = "tomo-llm"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dashmap",
  "reqwest",
  "serde",

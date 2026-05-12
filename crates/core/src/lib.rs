@@ -1,6 +1,6 @@
 //! Cross-cutting types shared by every crate in the workspace.
 //!
-//! Anything that the discord crate, scripting crate, gemini crate, etc. need
+//! Anything that the discord crate, scripting crate, llm crate, etc. need
 //! to agree on (config, error types, identity helpers, the [`Service`] trait
 //! that lets the binary spin up multiple long-running services side by side)
 //! lives here.

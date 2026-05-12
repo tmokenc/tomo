@@ -7,7 +7,7 @@
 pub mod anilist_view;
 pub mod command;
 pub mod ehentai_view;
-pub mod gemini_mention;
+pub mod llm_mention;
 pub mod intents;
 pub mod nhentai_view;
 pub mod prelude;

@@ -95,7 +95,7 @@ impl tomo_rpc::TomoControl for TomoControlImpl {
             uptime_seconds: uptime,
             owners: self.bot.owners.iter().map(|o| o.get()).collect(),
             bot_user_id: id.user_id.get(),
-            gemini_enabled: self.bot.gemini.is_some(),
+            gemini_enabled: self.bot.llm.is_some(),
 
             discriminator: id.discriminator as u32,
             avatar_url: id.avatar_url.clone().unwrap_or_default(),
