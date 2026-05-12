@@ -88,6 +88,14 @@ impl DiscordService {
             .map_err(|e| tomo_core::Error::config(format!("requester: {e}")))?;
         let ocr = build_ocr(&config);
 
+        // Hand the Myon config to the scripting crate's process-wide static
+        // *before* the gateway starts dispatching events — otherwise the
+        // first batch of MESSAGE_CREATE / VOICE_STATE_UPDATE events would
+        // race the init and miss `last_seen` updates.
+        init_myon(&config);
+
+        let settings = crate::settings::SettingsStore::new(Arc::clone(&db));
+
         let bot = Arc::new(BotState {
             http,
             cache,
@@ -98,6 +106,7 @@ impl DiscordService {
             scripts: Arc::clone(&scripts),
             requester,
             llm,
+            settings,
             ocr,
             commands: Arc::new(ArcSwap::from_pointee(CommandRegistry::new())),
             triggers: Arc::new(ArcSwap::from_pointee(TriggerRegistry::new())),
@@ -242,6 +251,21 @@ async fn shard_loop(bot: Bot, mut shard: Shard, mut shutdown: watch::Receiver<bo
 }
 
 async fn dispatch_event(bot: Bot, event: Event) {
+    // The cache update wipes pre-existing entries for the message id on
+    // delete and replaces the entry on update — so we have to snapshot the
+    // *previous* state before letting the cache mutate. The snapshot then
+    // feeds the edit / delete log handlers, which otherwise have no way to
+    // see what the message used to say.
+    let pre_dispatch = match &event {
+        Event::MessageUpdate(u) => {
+            bot.cache.message(u.id).map(|m| (*m).clone())
+        }
+        Event::MessageDelete(d) => {
+            bot.cache.message(d.id).map(|m| (*m).clone())
+        }
+        _ => None,
+    };
+
     bot.cache.update(&event);
     bot.standby.process(&event);
 
@@ -253,6 +277,23 @@ async fn dispatch_event(bot: Bot, event: Event) {
             debug!("gateway session resumed");
         }
         Event::MessageCreate(boxed) => on_message(bot, *boxed).await,
+        Event::MessageUpdate(boxed) => {
+            crate::message_log::handle_update(bot, *boxed, pre_dispatch).await;
+        }
+        Event::MessageDelete(d) => {
+            crate::message_log::handle_delete(bot, d, pre_dispatch).await;
+        }
+        Event::VoiceStateUpdate(boxed) => {
+            // Mirror MessageCreate's hand-off: if the tracked user just
+            // joined/left voice, flip `in_voice` and bump `last_seen`.
+            // Other users are ignored inside `observe_voice`.
+            let now = chrono::Utc::now().timestamp();
+            tomo_scripting::myon::observe_voice(
+                boxed.0.user_id.get(),
+                boxed.0.channel_id.is_some(),
+                now,
+            );
+        }
         Event::InteractionCreate(boxed) => on_interaction(bot, *boxed).await,
         _ => {}
     }
@@ -266,9 +307,28 @@ async fn on_message(bot: Bot, ev: MessageCreate) {
 
     bot.stats.record_message(message.author.id, message.guild_id);
 
-    // 1) Prefix commands.
+    // Feed the Myon tracker. The check (`user_id` match) lives inside
+    // `observe_message`; for all other authors this is a single atomic
+    // load + compare.
+    tomo_scripting::myon::observe_message(
+        message.author.id.get(),
+        message.timestamp.as_secs(),
+    );
+
+    // 1) Prefix commands. Per-guild prefix override (configured via
+    // `/settings`) wins over the global default; the master prefix is
+    // always available alongside both for owners.
     if bot.config.discord.enable_prefix {
-        if let Some((name, args)) = parse_prefix(&bot, &message) {
+        let guild_prefix = match message.guild_id {
+            Some(g) => bot
+                .settings
+                .get(g)
+                .await
+                .prefix
+                .filter(|s| !s.trim().is_empty()),
+            None => None,
+        };
+        if let Some((name, args)) = parse_prefix(&bot, &message, guild_prefix.as_deref()) {
             if let Some(cmd) = bot.commands.load().get(&name).cloned() {
                 run_command(
                     bot.clone(),
@@ -287,7 +347,7 @@ async fn on_message(bot: Bot, ev: MessageCreate) {
         registry.dispatch(&bot, &message).await;
     }
 
-    // 3) LLM mention (Gemini + any other rotating provider).
+    // 3) LLM mention — handled by the multi-provider router.
     if bot.config.discord.enable_llm
         && bot.llm.is_some()
         && llm_mention::should_respond(&message, &bot)
@@ -305,9 +365,18 @@ async fn on_interaction(bot: Bot, ev: InteractionCreate) {
     if !bot.config.discord.enable_slash {
         return;
     }
-    if !matches!(interaction.kind, InteractionType::ApplicationCommand) {
-        return; // components are handled via standby
+
+    match interaction.kind {
+        InteractionType::ApplicationCommand => dispatch_application_command(bot, interaction).await,
+        InteractionType::ModalSubmit => dispatch_modal_submit(bot, interaction).await,
+        // Buttons / select menus are picked up via `Standby` from inside
+        // commands that opted in (e.g. the paginator). Anything else just
+        // ignored.
+        _ => {}
     }
+}
+
+async fn dispatch_application_command(bot: Bot, interaction: Interaction) {
     let Some(data) = interaction.data.clone() else { return };
     let InteractionData::ApplicationCommand(cmd_data) = data else { return };
 
@@ -328,6 +397,22 @@ async fn on_interaction(bot: Bot, ev: InteractionCreate) {
         },
     )
     .await;
+}
+
+/// Modal submits come back with their own `custom_id`. We route by prefix
+/// so adding a second modal later is just another match arm.
+async fn dispatch_modal_submit(bot: Bot, interaction: Interaction) {
+    let Some(data) = interaction.data.clone() else { return };
+    let InteractionData::ModalSubmit(modal) = data else { return };
+
+    match modal.custom_id.as_str() {
+        crate::command::builtin::settings::MODAL_CUSTOM_ID => {
+            crate::command::builtin::settings::handle_submit(bot, interaction, *modal).await;
+        }
+        other => {
+            debug!(custom_id = other, "modal submit with unknown custom_id — ignoring");
+        }
+    }
 }
 
 /// Concatenate the leaf values of a slash command's options into a single
@@ -372,14 +457,49 @@ async fn run_command(bot: Bot, cmd: DynCommand, source: InvocationSource) {
         InvocationSource::Slash { interaction, .. } => interaction.guild_id,
     };
 
-    // Permission gates.
-    if meta.owner_only && !bot.is_owner(author) {
-        warn!(name = %meta.name, user = %author, "non-owner attempted owner command");
-        return;
-    }
-    if meta.guild_only && guild_id.is_none() {
-        warn!(name = %meta.name, "guild-only command used in DM");
-        return;
+    // Permission gates. Bot owners bypass everything (owner_only, guild_only,
+    // required_permissions) on any server — useful for emergency admin and
+    // for the bot author testing in their own dev guild without role
+    // wrangling.
+    let is_owner = bot.is_owner(author);
+    if !is_owner {
+        if meta.owner_only {
+            warn!(name = %meta.name, user = %author, "non-owner attempted owner command");
+            return;
+        }
+        if meta.guild_only && guild_id.is_none() {
+            warn!(name = %meta.name, "guild-only command used in DM");
+            return;
+        }
+        if let Some(required) = meta.required_permissions {
+            let Some(gid) = guild_id else {
+                warn!(name = %meta.name, "permission-gated command used in DM");
+                return;
+            };
+            match crate::permissions::resolve(&bot, author, gid).await {
+                Ok(perms) if perms.contains(required) => {}
+                Ok(_) => {
+                    warn!(
+                        name = %meta.name,
+                        user = %author,
+                        guild = %gid,
+                        required = ?required,
+                        "user lacks required permissions"
+                    );
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        name = %meta.name,
+                        user = %author,
+                        guild = %gid,
+                        error = %e,
+                        "permission calc failed even after hydrate — denying"
+                    );
+                    return;
+                }
+            }
+        }
     }
 
     let ctx = CommandContext::new(Arc::clone(&bot), source);
@@ -399,13 +519,22 @@ async fn run_command(bot: Bot, cmd: DynCommand, source: InvocationSource) {
     }
 }
 
-fn parse_prefix(bot: &Bot, msg: &Message) -> Option<(String, String)> {
+/// Strip the prefix from `msg.content` and split off the command name +
+/// args. `guild_prefix` is the per-guild override from settings; when
+/// `None` we fall back to the global `TOMO_PREFIX`. The master prefix is
+/// always matched first for owners regardless of any override.
+fn parse_prefix(
+    bot: &Bot,
+    msg: &Message,
+    guild_prefix: Option<&str>,
+) -> Option<(String, String)> {
     let content = msg.content.trim_start();
+    let server_prefix = guild_prefix.unwrap_or(bot.config.discord.prefix.as_str());
     let prefix = if bot.is_owner(msg.author.id) {
         try_prefix(content, &bot.config.discord.master_prefix)
-            .or_else(|| try_prefix(content, &bot.config.discord.prefix))?
+            .or_else(|| try_prefix(content, server_prefix))?
     } else {
-        try_prefix(content, &bot.config.discord.prefix)?
+        try_prefix(content, server_prefix)?
     };
     let rest = content[prefix.len()..].trim_start();
     let (name, args) = match rest.find(char::is_whitespace) {
@@ -514,6 +643,38 @@ fn build_ocr(config: &Config) -> Vec<crate::state::OcrSlot> {
     out.extend(try_load("latin", cfg.latin.as_ref()));
     out.extend(try_load("cjk", cfg.cjk.as_ref()));
     out
+}
+
+/// Hand the Myon config from env down to the scripting crate's
+/// process-wide static. Skipped when `MYON_USER_ID` isn't set — the
+/// tracker stays dormant and the time script's myon row hides itself.
+fn init_myon(config: &Config) {
+    let Some(cfg) = config.myon.as_ref() else { return };
+    let tz: chrono_tz::Tz = match cfg.timezone.parse() {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                tz = %cfg.timezone,
+                error = %e,
+                "myon: invalid timezone string — tracker disabled"
+            );
+            return;
+        }
+    };
+    info!(
+        user = cfg.user_id,
+        tz = %cfg.timezone,
+        sleep_hour = cfg.sleep_hour,
+        idle_minutes = cfg.idle_seconds / 60,
+        "myon: tracker enabled"
+    );
+    tomo_scripting::myon::init(tomo_scripting::myon::MyonConfig {
+        user_id: cfg.user_id,
+        timezone: tz,
+        label: cfg.label.clone(),
+        sleep_hour: cfg.sleep_hour,
+        idle_seconds: cfg.idle_seconds,
+    });
 }
 
 /// Build the multi-provider router from the parsed config. Returns `None`

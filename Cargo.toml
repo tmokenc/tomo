@@ -88,7 +88,7 @@ qrcode    = { version = "0.14", default-features = false, features = ["image"] }
 image     = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 rqrr      = "0.10"
 ocr-rs    = "2"
-scraper   = "0.26"
+scraper   = "0.27"
 bitflags  = { version = "2", features = ["serde"] }
 
 # gRPC

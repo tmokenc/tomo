@@ -46,6 +46,9 @@ pub struct BotState {
     pub scripts: Arc<ScriptManager>,
     pub requester: Requester,
     pub llm: Option<LlmContext>,
+    /// Per-guild settings (log channel, prefix override, etc.). Backed by
+    /// `tomo-db` with an in-memory read-through cache.
+    pub settings: crate::settings::SettingsStore,
     /// Zero, one, or two OCR engines (Latin / CJK). The `ocr` command runs
     /// every loaded engine and merges the output, so configuring both gives
     /// full coverage of en / cs / vi / zh / ja.

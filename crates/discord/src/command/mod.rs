@@ -20,6 +20,7 @@ pub use registry::CommandRegistry;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use twilight_model::guild::Permissions;
 
 use tomo_core::error::Result;
 
@@ -56,6 +57,10 @@ pub struct CommandMeta {
     pub prefix: bool,
     pub guild_only: bool,
     pub owner_only: bool,
+    /// Discord permissions the invoker must hold in the guild. `None` means
+    /// no permission gate (everyone can run). Bot owners *always* bypass
+    /// this, on any server.
+    pub required_permissions: Option<Permissions>,
     pub options: Vec<CommandOption>,
 }
 
@@ -70,6 +75,7 @@ impl CommandMeta {
             prefix: true,
             guild_only: false,
             owner_only: false,
+            required_permissions: None,
             options: Vec::new(),
         }
     }
@@ -84,6 +90,14 @@ impl CommandMeta {
     pub fn prefix_only(mut self) -> Self { self.slash = false; self.prefix = true; self }
     pub fn guild_only(mut self) -> Self { self.guild_only = true; self }
     pub fn owner_only(mut self) -> Self { self.owner_only = true; self }
+    /// Require the invoker to hold *every* permission bit in `perm` in the
+    /// guild the command runs in. Implies `guild_only` (perm checks need a
+    /// guild to evaluate against). Owners bypass this.
+    pub fn requires_permissions(mut self, perm: Permissions) -> Self {
+        self.required_permissions = Some(perm);
+        self.guild_only = true;
+        self
+    }
 
     pub fn option(mut self, opt: CommandOption) -> Self {
         self.options.push(opt);

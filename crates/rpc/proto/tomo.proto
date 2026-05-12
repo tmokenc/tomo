@@ -27,7 +27,7 @@ message BotStatus {
     int64           uptime_seconds   = 4;
     repeated uint64 owners           = 5;
     uint64          bot_user_id      = 6;
-    bool            gemini_enabled   = 7;
+    bool            llm_enabled      = 7;
 
     // Identity fetched from Discord on startup.
     uint32 discriminator            = 8;
@@ -43,19 +43,19 @@ message BotStatus {
 }
 
 message GlobalStats {
-    uint64 messages      = 1;
-    uint64 commands      = 2;
-    uint64 gemini_calls  = 3;
-    uint64 gemini_tokens = 4;
+    uint64 messages   = 1;
+    uint64 commands   = 2;
+    uint64 llm_calls  = 3;
+    uint64 llm_tokens = 4;
 }
 
 message UserStatsRequest { uint64 user_id = 1; }
 message UserStats {
-    uint64 user_id       = 1;
-    uint64 messages      = 2;
-    uint64 commands      = 3;
-    uint64 gemini_calls  = 4;
-    uint64 gemini_tokens = 5;
+    uint64 user_id    = 1;
+    uint64 messages   = 2;
+    uint64 commands   = 3;
+    uint64 llm_calls  = 4;
+    uint64 llm_tokens = 5;
 }
 
 message GuildStatsRequest { uint64 guild_id = 1; }

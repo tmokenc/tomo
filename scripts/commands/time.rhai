@@ -1,5 +1,9 @@
 // Show the current time across a handful of common timezones. Passing a
 // timestamp argument (Unix seconds) shows the time for that instant.
+//
+// When `MYON_USER_ID` is configured on the bot, a "Myon time" row is
+// appended that tracks a specific user's awake/asleep state — see
+// `crate::myon` in tomo-scripting.
 fn meta() {
     #{
         name: "time",
@@ -36,8 +40,24 @@ fn execute(ctx) {
         `Showing the current time (Unix ${stamp}).`
     });
     for entry in zones {
-        e.field_inline(entry[0], format_time_in(entry[1], stamp, fmt));
+        let label = entry[0];
+        let tz = entry[1];
+        // `format_offset_in` returns "+07" / "-05" — short and unambiguous.
+        // Empty string means we couldn't resolve the tz, which would already
+        // have shown up as a format error elsewhere.
+        let offset = format_offset_in(tz, stamp);
+        let value = format_time_in(tz, stamp, fmt);
+        e.field_inline(`${label} (GMT${offset})`, value);
     }
+
+    // Myon time — only shown when MYON_USER_ID is configured. The "GMT++"
+    // label is preserved from the original tomoka-rs version: the hour
+    // can go past 24 while the tracked user is still awake, so a real
+    // GMT offset doesn't apply.
+    if myon_enabled() {
+        e.field_inline(`${myon_label()} (GMT++)`, myon_time(stamp, fmt));
+    }
+
     e.field_block("Discord render", `<t:${stamp}:F> · <t:${stamp}:R>`);
     e.author_with(ctx.author_name, ctx.author_avatar_url, "");
     e.footer_with(`${ctx.bot_name} · /time`, ctx.bot_avatar_url);

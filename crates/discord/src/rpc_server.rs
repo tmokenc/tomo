@@ -95,7 +95,7 @@ impl tomo_rpc::TomoControl for TomoControlImpl {
             uptime_seconds: uptime,
             owners: self.bot.owners.iter().map(|o| o.get()).collect(),
             bot_user_id: id.user_id.get(),
-            gemini_enabled: self.bot.llm.is_some(),
+            llm_enabled: self.bot.llm.is_some(),
 
             discriminator: id.discriminator as u32,
             avatar_url: id.avatar_url.clone().unwrap_or_default(),
@@ -115,8 +115,8 @@ impl tomo_rpc::TomoControl for TomoControlImpl {
         Ok(Response::new(GlobalStats {
             messages: g.messages,
             commands: g.commands,
-            gemini_calls: g.gemini_calls,
-            gemini_tokens: g.gemini_tokens,
+            llm_calls: g.llm_calls,
+            llm_tokens: g.llm_tokens,
         }))
     }
 
@@ -128,8 +128,8 @@ impl tomo_rpc::TomoControl for TomoControlImpl {
             user_id: s.user_id,
             messages: s.messages,
             commands: s.commands,
-            gemini_calls: s.gemini_calls,
-            gemini_tokens: s.gemini_tokens,
+            llm_calls: s.llm_calls,
+            llm_tokens: s.llm_tokens,
         }))
     }
 

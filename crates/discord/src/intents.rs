@@ -33,4 +33,8 @@ pub fn event_types() -> EventTypeFlags {
         | EventTypeFlags::MEMBER_ADD
         | EventTypeFlags::MEMBER_REMOVE
         | EventTypeFlags::MEMBER_UPDATE
+        // Drives the Myon time tracker — joining/leaving voice flips the
+        // "in_voice" state that keeps a user marked as awake even when
+        // they aren't typing.
+        | EventTypeFlags::VOICE_STATE_UPDATE
 }

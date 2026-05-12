@@ -126,6 +126,51 @@ impl PersistentCache {
         crate::update::dispatch(self, event);
     }
 
+    /// Insert (or overwrite) a member fetched out-of-band — typically when
+    /// the bot just made an HTTP `guild_member` call to hydrate state that
+    /// the gateway hadn't delivered yet. Equivalent to the cache update a
+    /// `MEMBER_ADD` event would have performed: stores the member, links
+    /// it into `guild_members`, and back-fills the embedded `User` /
+    /// `guild_members` indices.
+    ///
+    /// Useful for permission-gated dispatch: when the permission calculator
+    /// returns `MemberUnavailable`, the caller can fetch + insert here and
+    /// retry without paying the round-trip again next time.
+    pub fn upsert_member(
+        &self,
+        guild_id: twilight_model::id::Id<twilight_model::id::marker::GuildMarker>,
+        member: twilight_model::guild::Member,
+    ) {
+        use crate::resource::ResourceType;
+        if self.config.resource_types.contains(ResourceType::USER) {
+            self.users.insert(member.user.id, member.user.clone());
+        }
+        self.guild_members
+            .entry(guild_id)
+            .or_default()
+            .insert(member.user.id);
+        self.members.insert((guild_id, member.user.id), member);
+    }
+
+    /// Insert (or overwrite) a single role on a guild. Same out-of-band
+    /// helper as [`upsert_member`] but for roles — used when the
+    /// permission calculator hits `RoleUnavailable` for a role that's
+    /// only just been created or that the cache missed.
+    pub fn upsert_role(
+        &self,
+        guild_id: twilight_model::id::Id<twilight_model::id::marker::GuildMarker>,
+        role: twilight_model::guild::Role,
+    ) {
+        self.guild_roles
+            .entry(guild_id)
+            .or_default()
+            .insert(role.id);
+        self.roles.insert(
+            role.id,
+            crate::cache::GuildResource { guild_id, value: role },
+        );
+    }
+
     /// Counts of each resource type. Mirror of `InMemoryCache::stats`.
     pub fn stats(&self) -> crate::stats::PersistentCacheStats<'_> {
         crate::stats::PersistentCacheStats::new(self)

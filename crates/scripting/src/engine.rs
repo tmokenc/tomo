@@ -61,6 +61,23 @@ pub fn make_engine() -> Engine {
             .map(|t| t.with_timezone(&tz).format(fmt).to_string())
             .unwrap_or_default()
     });
+
+    // GMT offset helper for the `/time` command's per-zone label —
+    // returns "+07", "-05", "+00" (matches the tomoka-rs format).
+    engine.register_fn("format_offset_in", |tz: &str, unix: i64| -> String {
+        crate::myon::format_offset(tz, unix)
+    });
+
+    // Myon-time helpers — see `crate::myon`. When no `MYON_USER_ID` is
+    // configured, `myon_enabled()` returns false and `myon_time()` returns
+    // an empty string, so scripts can branch on the toggle.
+    engine.register_fn("myon_enabled", || -> bool { crate::myon::is_enabled() });
+    engine.register_fn("myon_label", || -> String {
+        crate::myon::label().unwrap_or("").to_string()
+    });
+    engine.register_fn("myon_time", |unix: i64, fmt: &str| -> String {
+        crate::myon::format_at(unix, fmt)
+    });
     engine.register_fn("format_duration", |seconds: i64| -> String {
         if seconds <= 0 {
             return "0s".to_string();

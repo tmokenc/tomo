@@ -38,6 +38,10 @@ impl ScriptCommandAdapter {
             prefix: script.prefix,
             guild_only: script.guild_only,
             owner_only: false,
+            // Scripts can't declare native Discord-permission gates today
+            // — they only see the `ScriptCtx` surface. If we expose perms
+            // to scripts later, populate this here.
+            required_permissions: None,
             options: Vec::new(),
         };
         Self { script, meta, manager }

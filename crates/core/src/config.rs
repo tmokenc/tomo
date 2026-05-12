@@ -15,10 +15,31 @@ pub struct Config {
     pub discord: DiscordConfig,
     pub llm: Option<LlmConfig>,
     pub ocr: Option<OcrConfig>,
+    /// Inhabited when `MYON_USER_ID` is set. Tracks a specific user's
+    /// "is asleep yet?" state so the `/time` command can render a
+    /// per-user custom timezone that lets the day extend past 24h.
+    pub myon: Option<MyonConfig>,
     /// Directory the database backend lives in. Created on first run.
     pub data_dir: PathBuf,
     pub script_dir: PathBuf,
     pub enable_hot_reload: bool,
+}
+
+/// Configuration for the Myon time tracker. Parsed eagerly from env when
+/// `MYON_USER_ID` is set. The timezone is stored as a string because
+/// parsing it depends on `chrono_tz` which we don't want as a hard dep of
+/// tomo-core — the consumer (`tomo_scripting::myon::init`) parses it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyonConfig {
+    pub user_id: u64,
+    pub timezone: String,
+    pub label: String,
+    /// Hour-of-day past which the tracked user is always considered to
+    /// have slept (the hour boundary their day "must" have ended by).
+    pub sleep_hour: u32,
+    /// Idle window (seconds) after which a non-voice user is considered
+    /// asleep. Voice presence overrides this.
+    pub idle_seconds: i64,
 }
 
 /// PaddleOCR (PP-OCRv5) model file paths. Each slot is optional — operators
@@ -168,15 +189,37 @@ impl Config {
             cfg.is_some().then_some(cfg)
         };
 
+        let myon = build_myon_config();
+
         Ok(Self {
             discord,
             llm,
             ocr,
+            myon,
             data_dir,
             script_dir,
             enable_hot_reload,
         })
     }
+}
+
+/// Parse `MYON_*` env into [`MyonConfig`]. Returns `None` unless
+/// `MYON_USER_ID` is set to a valid u64 — the rest fall back to sensible
+/// defaults (Vietnam time, "Myon", sleep-by-6am, 5-minute idle window).
+fn build_myon_config() -> Option<MyonConfig> {
+    let user_id: u64 = optional("MYON_USER_ID")?.parse().ok()?;
+    let timezone = optional("MYON_TIMEZONE").unwrap_or_else(|| "Asia/Ho_Chi_Minh".into());
+    let label = optional("MYON_LABEL").unwrap_or_else(|| "Myon".into());
+    let sleep_hour = parse_env("MYON_SLEEP_HOUR", 6u32);
+    // Tomoka-rs used a 5-minute idle window; mirror it.
+    let idle_minutes: i64 = parse_env("MYON_IDLE_MINUTES", 5i64);
+    Some(MyonConfig {
+        user_id,
+        timezone,
+        label,
+        sleep_hour,
+        idle_seconds: idle_minutes.saturating_mul(60),
+    })
 }
 
 // ---------- LLM config helpers ----------

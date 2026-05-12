@@ -24,6 +24,7 @@ mod ping;
 mod qr_code;
 mod reload;
 mod remind;
+pub mod settings;
 mod stats;
 mod top;
 mod urban;
@@ -60,5 +61,6 @@ pub fn all() -> Vec<Arc<dyn Command>> {
         // — Admin —
         boxed(reload::ReloadCommand),
         boxed(llm::LlmCommand),
+        boxed(settings::SettingsCommand),
     ]
 }

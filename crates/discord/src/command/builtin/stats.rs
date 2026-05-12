@@ -25,12 +25,12 @@ impl Command for StatsCommand {
             .description("Numbers since the database was first created.")
             .field_inline("Messages seen", g.messages.to_string())
             .field_inline("Commands run", g.commands.to_string())
-            .field_inline("Gemini calls", g.gemini_calls.to_string())
-            .field_inline("Gemini tokens", g.gemini_tokens.to_string())
+            .field_inline("LLM calls", g.llm_calls.to_string())
+            .field_inline("LLM tokens", g.llm_tokens.to_string())
             .field_block("\u{200b}", "**— Your stats —**")
             .field_inline("Your messages", me.messages.to_string())
             .field_inline("Your commands", me.commands.to_string())
-            .field_inline("Your Gemini calls", me.gemini_calls.to_string());
+            .field_inline("Your LLM calls", me.llm_calls.to_string());
 
         if let Some(guild_id) = ctx.guild_id() {
             let gs = ctx.bot.stats.guild_stats(guild_id).await?;

@@ -18,6 +18,7 @@ pub mod embed;
 pub mod engine;
 pub mod loader;
 pub mod manager;
+pub mod myon;
 pub mod registry;
 pub mod trigger;
 pub mod watcher;

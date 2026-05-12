@@ -27,7 +27,7 @@ pub struct StatusResponse {
     pub uptime_seconds: i64,
     pub owners: Vec<u64>,
     pub bot_user_id: u64,
-    pub gemini_enabled: bool,
+    pub llm_enabled: bool,
     pub discriminator: u32,
     pub avatar_url: String,
     pub application_id: u64,
@@ -44,8 +44,8 @@ pub struct StatusResponse {
 pub struct GlobalStatsResponse {
     pub messages: u64,
     pub commands: u64,
-    pub gemini_calls: u64,
-    pub gemini_tokens: u64,
+    pub llm_calls: u64,
+    pub llm_tokens: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,8 +53,8 @@ pub struct UserStatsResponse {
     pub user_id: u64,
     pub messages: u64,
     pub commands: u64,
-    pub gemini_calls: u64,
-    pub gemini_tokens: u64,
+    pub llm_calls: u64,
+    pub llm_tokens: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,7 +132,7 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<StatusResponse
         uptime_seconds: resp.uptime_seconds,
         owners: resp.owners,
         bot_user_id: resp.bot_user_id,
-        gemini_enabled: resp.gemini_enabled,
+        llm_enabled: resp.llm_enabled,
         discriminator: resp.discriminator,
         avatar_url: resp.avatar_url,
         application_id: resp.application_id,
@@ -155,8 +155,8 @@ pub async fn global_stats(State(state): State<AppState>) -> Result<Json<GlobalSt
     Ok(Json(GlobalStatsResponse {
         messages: resp.messages,
         commands: resp.commands,
-        gemini_calls: resp.gemini_calls,
-        gemini_tokens: resp.gemini_tokens,
+        llm_calls: resp.llm_calls,
+        llm_tokens: resp.llm_tokens,
     }))
 }
 
@@ -173,8 +173,8 @@ pub async fn user_stats(
         user_id: resp.user_id,
         messages: resp.messages,
         commands: resp.commands,
-        gemini_calls: resp.gemini_calls,
-        gemini_tokens: resp.gemini_tokens,
+        llm_calls: resp.llm_calls,
+        llm_tokens: resp.llm_tokens,
     }))
 }
 

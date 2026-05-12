@@ -225,6 +225,40 @@ impl CommandContext {
         Ok(())
     }
 
+    /// Send a `Modal` interaction response. Slash-only — for prefix
+    /// invocations this returns `Ok(())` after a debug log (modals require
+    /// an interaction token; a plain message can't pop one).
+    ///
+    /// `components` must be a Vec of `ActionRow`s, each carrying exactly
+    /// one `TextInput` (Discord's modal constraint).
+    pub async fn respond_modal(
+        &self,
+        custom_id: &str,
+        title: &str,
+        components: Vec<twilight_model::channel::message::Component>,
+    ) -> Result<()> {
+        let InvocationSource::Slash { interaction, .. } = &self.source else {
+            tracing::debug!("respond_modal called from a prefix invocation — ignoring");
+            return Ok(());
+        };
+        let data = InteractionResponseDataBuilder::new()
+            .custom_id(custom_id.to_string())
+            .title(title.to_string())
+            .components(components)
+            .build();
+        let response = InteractionResponse {
+            kind: InteractionResponseType::Modal,
+            data: Some(data),
+        };
+        let client = self.bot.http.interaction(interaction.application_id);
+        client
+            .create_response(interaction.id, &interaction.token, &response)
+            .await
+            .map_err(|e| Error::config(format!("respond_modal: {e}")))?;
+        self.responded.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Defer a slash command response — useful when the command does slow work.
     pub async fn defer(&self) -> Result<()> {
         let InvocationSource::Slash { interaction, .. } = &self.source else { return Ok(()); };

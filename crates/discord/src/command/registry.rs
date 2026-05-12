@@ -52,14 +52,24 @@ impl CommandRegistry {
     }
 
     /// Build the list of Discord application commands for the slash-aware
-    /// commands in this registry.
+    /// commands in this registry. Carries the meta's
+    /// `required_permissions` down as `default_member_permissions` so
+    /// Discord hides the command from users who lack them — the runtime
+    /// still re-checks (owner bypass + defence in depth).
     pub fn to_discord_commands(&self) -> Vec<DiscordCommand> {
         self.iter_unique()
             .filter(|c| c.meta().slash)
             .map(|c| {
                 let meta = c.meta();
-                CommandBuilder::new(meta.name.clone(), meta.description.clone(), CommandType::ChatInput)
-                    .build()
+                let mut builder = CommandBuilder::new(
+                    meta.name.clone(),
+                    meta.description.clone(),
+                    CommandType::ChatInput,
+                );
+                if let Some(req) = meta.required_permissions {
+                    builder = builder.default_member_permissions(req);
+                }
+                builder.build()
             })
             .collect()
     }

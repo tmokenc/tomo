@@ -4,7 +4,6 @@
 pub use tomo_embed::truncate;
 
 use bytes::Bytes;
-use ocr_rs::OcrEngine;
 use tokio::task;
 use tracing::warn;
 use twilight_model::channel::{Attachment, Message};
@@ -14,6 +13,7 @@ use twilight_model::id::marker::{ChannelMarker, UserMarker};
 use tomo_core::error::{Error, Result};
 
 use crate::command::{CommandContext, InvocationSource};
+use crate::ocr_merge;
 use crate::state::{Bot, OcrSlot};
 
 /// How many recent cached messages to walk when looking for an image
@@ -162,7 +162,7 @@ pub async fn fetch_image_from_context(ctx: &CommandContext) -> Result<Option<Byt
 }
 
 /// Variant of [`find_image_url`] that operates on a [`Message`] directly,
-/// for callers that don't have a [`CommandContext`] (e.g. the gemini-mention
+/// for callers that don't have a [`CommandContext`] (e.g. the LLM-mention
 /// handler). Walks: attachments on the message → reply target → message
 /// embeds → recent cached channel messages.
 pub fn find_image_url_in_message(bot: &Bot, message: &Message) -> Option<String> {
@@ -183,50 +183,18 @@ pub fn find_image_url_in_message(bot: &Bot, message: &Message) -> Option<String>
     cache_lookback(bot, message.channel_id)
 }
 
-/// Run every configured OCR engine over `bytes`, concatenate the recognised
-/// text, and return it as a single string. Empty if no engines are set up or
-/// the engines produced nothing. Errors bubble up only when a load step
-/// fails — individual engine misses are logged and swallowed.
+/// Run every configured OCR engine over `bytes`, merge their bounding
+/// boxes spatially via [`crate::ocr_merge`], and return the joined text
+/// as a single string. Empty if no engines are set up or the engines
+/// produced nothing. Errors bubble up only when image decoding fails —
+/// individual engine misses are logged and swallowed by `run_merged`.
 pub async fn ocr_bytes(engines: Vec<OcrSlot>, bytes: Bytes) -> Result<String> {
     if engines.is_empty() {
         return Ok(String::new());
     }
     let bytes = bytes.to_vec();
-    let text = task::spawn_blocking(move || run_ocr_all(&engines, &bytes))
+    let lines = task::spawn_blocking(move || ocr_merge::run_merged(&engines, &bytes))
         .await
         .map_err(|e| Error::config(format!("ocr join: {e}")))??;
-    Ok(text)
-}
-
-fn run_ocr_all(engines: &[OcrSlot], bytes: &[u8]) -> Result<String> {
-    let image = image::load_from_memory(bytes)
-        .map_err(|e| Error::config(format!("ocr image load: {e}")))?;
-    let mut out = String::new();
-    for slot in engines {
-        match run_ocr_one(&slot.engine, &image) {
-            Ok(text) if !text.trim().is_empty() => {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(text.trim());
-            }
-            Ok(_) => {}
-            Err(e) => warn!(engine = slot.name, error = %e, "ocr engine failed"),
-        }
-    }
-    Ok(out)
-}
-
-fn run_ocr_one(engine: &OcrEngine, image: &image::DynamicImage) -> Result<String> {
-    let results = engine
-        .recognize(image)
-        .map_err(|e| Error::config(format!("ocr recognize: {e}")))?;
-    let mut out = String::new();
-    for r in results {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&r.text);
-    }
-    Ok(out)
+    Ok(ocr_merge::render(&lines))
 }

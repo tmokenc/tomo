@@ -213,7 +213,7 @@ pub async fn handle(bot: Bot, message: Message) -> Result<()> {
         Turn { role: Role::Model, text: response.text.clone() },
     );
 
-    bot.stats.record_gemini(
+    bot.stats.record_llm(
         message.author.id,
         message.guild_id,
         response.prompt_tokens,
@@ -236,9 +236,9 @@ pub async fn handle(bot: Bot, message: Message) -> Result<()> {
 }
 
 /// Drop oldest turns until the history both fits the budget and starts on a
-/// user turn. Gemini rejects requests that begin with a model turn ("role
-/// must be 'user'"), so this is load-bearing for any conversation past the
-/// `context_messages` cap.
+/// user turn. Some providers (notably Gemini) reject requests that begin
+/// with a model turn ("role must be 'user'"), so this trimming is
+/// load-bearing for any conversation past the `context_messages` cap.
 fn trim_for_request(mut turns: Vec<Turn>, max_prior: usize) -> Vec<Turn> {
     if turns.len() > max_prior {
         let drop = turns.len() - max_prior;
@@ -285,9 +285,10 @@ async fn maybe_alert_quota(bot: &Bot) {
         return; // another task got there first
     }
 
-    info!("DMing owners — gemini quota exhausted for today");
-    let body = "⚠️ Gemini quota / rate limit hit. Mentions are being silently dropped \
-                until the quota resets. (You'll only see this once per day.)";
+    info!("DMing owners — every LLM provider in the chain is rate-limited or out of quota");
+    let body = "⚠️ Every configured LLM provider is rate-limited or out of quota right now. \
+                Mentions are being silently dropped until something resets. \
+                (You'll only see this once per day.)";
     for owner_id in bot.owners.iter().copied() {
         if let Err(e) = dm(bot, owner_id, body).await {
             warn!(owner = %owner_id, error = %e, "could not DM owner about quota");
@@ -324,13 +325,43 @@ fn strip_self_mention(content: &str, bot_user_id: u64) -> String {
 }
 
 /// Build the per-request context block appended to the configured system
-/// prompt. Lists where the message came from (server / channel / topic /
-/// DMs), who sent it, plus the current UTC date — all things the static
-/// prompt can't know.
+/// prompt. Lists who the bot is (name + id + owner), where the message
+/// came from (server / channel / topic / DMs), who sent it, plus the
+/// current UTC date — all things the static prompt can't know or that
+/// might drift if the bot is renamed in Discord.
 ///
 /// Kept compact (one line per fact) to minimise input-token cost.
 fn build_context(bot: &Bot, message: &Message) -> String {
-    let mut lines = Vec::with_capacity(6);
+    let mut lines = Vec::with_capacity(8);
+
+    // ── Self: who the model is acting as. Surfaces the bot's *live*
+    // Discord identity so a rename in the dev portal doesn't leave the
+    // static system prompt out of sync, and gives the model a referent
+    // to recognise mentions of itself in chat. ──
+    let id = &bot.identity;
+    lines.push(format!(
+        "You are the Discord bot \"{name}\" (user id {uid}).",
+        name = id.username,
+        uid = id.user_id,
+    ));
+    if let Some(owner) = id.owner.as_ref() {
+        lines.push(format!(
+            "Your owner / operator is \"{name}\" (user id {uid}); defer to them on \
+             operational questions about the bot.",
+            name = owner.username,
+            uid = owner.id,
+        ));
+    } else if !bot.owners.is_empty() {
+        // Application-info had no owner attached (rare, e.g. a team-owned
+        // app) — fall back to whatever `TOMO_OWNERS` exposes.
+        let ids = bot
+            .owners
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("Operator user ids: {ids}."));
+    }
 
     // Where: guild + channel.
     match message.guild_id {

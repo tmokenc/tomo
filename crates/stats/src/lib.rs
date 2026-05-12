@@ -1,11 +1,16 @@
 //! Stats collection backed by [`tomo_db::KvStore`].
 //!
-//! Every command, message, and Gemini call is recorded as a counter
-//! increment. The hot path is non-blocking: call-sites push an [`Event`] onto
-//! a flume channel and a dedicated writer task drains the channel in batches.
+//! Every command, message, and LLM call is recorded as a counter increment.
+//! The hot path is non-blocking: call-sites push an [`Event`] onto a flume
+//! channel and a dedicated writer task drains the channel in batches.
 //!
 //! Reads (top commands, per-user stats, global totals) are fully async — they
 //! call `KvStore::list_prefix` or `KvStore::get` under the hood.
+//!
+//! Note: the on-disk key strings still spell out `gemini` (e.g.
+//! `global:gemini_calls`). They predate the multi-provider router and are
+//! kept verbatim so existing user stats survive across restarts. Only the
+//! Rust-facing API was renamed to `llm_*`.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,8 +70,8 @@ pub struct UserStats {
     pub user_id: u64,
     pub messages: u64,
     pub commands: u64,
-    pub gemini_calls: u64,
-    pub gemini_tokens: u64,
+    pub llm_calls: u64,
+    pub llm_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -80,8 +85,8 @@ pub struct GuildStats {
 pub struct GlobalStats {
     pub messages: u64,
     pub commands: u64,
-    pub gemini_calls: u64,
-    pub gemini_tokens: u64,
+    pub llm_calls: u64,
+    pub llm_tokens: u64,
 }
 
 #[derive(Debug)]
@@ -98,7 +103,7 @@ enum Event {
         user_id: u64,
         guild_id: Option<u64>,
     },
-    Gemini {
+    Llm {
         user_id: u64,
         guild_id: Option<u64>,
         prompt_tokens: u32,
@@ -143,14 +148,14 @@ impl Stats {
         });
     }
 
-    pub fn record_gemini(
+    pub fn record_llm(
         &self,
         user_id: Id<UserMarker>,
         guild_id: Option<Id<GuildMarker>>,
         prompt_tokens: u32,
         output_tokens: u32,
     ) {
-        self.send(Event::Gemini {
+        self.send(Event::Llm {
             user_id: user_id.get(),
             guild_id: guild_id.map(|g| g.get()),
             prompt_tokens,
@@ -188,8 +193,8 @@ impl Stats {
         Ok(GlobalStats {
             messages: read_u64(&self.store, key_global::MESSAGES).await,
             commands: read_u64(&self.store, key_global::COMMANDS).await,
-            gemini_calls: read_u64(&self.store, key_global::GEMINI_CALLS).await,
-            gemini_tokens: read_u64(&self.store, key_global::GEMINI_TOKENS).await,
+            llm_calls: read_u64(&self.store, key_global::LLM_CALLS).await,
+            llm_tokens: read_u64(&self.store, key_global::LLM_TOKENS).await,
         })
     }
 
@@ -199,8 +204,8 @@ impl Stats {
             user_id: id,
             messages: read_u64(&self.store, &key_user::messages(id)).await,
             commands: read_u64(&self.store, &key_user::commands(id)).await,
-            gemini_calls: read_u64(&self.store, &key_user::gemini(id)).await,
-            gemini_tokens: read_u64(&self.store, &key_user::gemini_tokens(id)).await,
+            llm_calls: read_u64(&self.store, &key_user::llm(id)).await,
+            llm_tokens: read_u64(&self.store, &key_user::llm_tokens(id)).await,
         })
     }
 
@@ -275,13 +280,13 @@ fn push_events(batch: &mut Vec<KvOp>, ev: Event) {
                 push_inc(batch, &key_guild::messages(gid), 1);
             }
         }
-        Event::Gemini { user_id, guild_id, prompt_tokens, output_tokens } => {
-            push_inc(batch, key_global::GEMINI_CALLS, 1);
-            push_inc(batch, key_global::GEMINI_TOKENS, (prompt_tokens + output_tokens) as u64);
-            push_inc(batch, &key_user::gemini(user_id), 1);
-            push_inc(batch, &key_user::gemini_tokens(user_id), (prompt_tokens + output_tokens) as u64);
+        Event::Llm { user_id, guild_id, prompt_tokens, output_tokens } => {
+            push_inc(batch, key_global::LLM_CALLS, 1);
+            push_inc(batch, key_global::LLM_TOKENS, (prompt_tokens + output_tokens) as u64);
+            push_inc(batch, &key_user::llm(user_id), 1);
+            push_inc(batch, &key_user::llm_tokens(user_id), (prompt_tokens + output_tokens) as u64);
             if let Some(gid) = guild_id {
-                push_inc(batch, &key_guild::gemini(gid), 1);
+                push_inc(batch, &key_guild::llm(gid), 1);
             }
         }
     }
@@ -304,24 +309,27 @@ mod key_prefix {
     pub const COMMAND_LATENCY: &str = "cmd:lat:";
 }
 
+// String literals here intentionally keep the `gemini` spelling. They are
+// the on-disk schema — renaming would orphan existing user counters. The
+// Rust-facing const / fn identifiers track the multi-provider naming.
 mod key_global {
     pub const MESSAGES: &str = "global:messages";
     pub const COMMANDS: &str = "global:commands";
-    pub const GEMINI_CALLS: &str = "global:gemini_calls";
-    pub const GEMINI_TOKENS: &str = "global:gemini_tokens";
+    pub const LLM_CALLS: &str = "global:gemini_calls";
+    pub const LLM_TOKENS: &str = "global:gemini_tokens";
 }
 
 mod key_user {
     pub fn messages(id: u64) -> String { format!("user:{id}:messages") }
     pub fn commands(id: u64) -> String { format!("user:{id}:commands") }
-    pub fn gemini(id: u64) -> String   { format!("user:{id}:gemini") }
-    pub fn gemini_tokens(id: u64) -> String { format!("user:{id}:gemini_tokens") }
+    pub fn llm(id: u64) -> String      { format!("user:{id}:gemini") }
+    pub fn llm_tokens(id: u64) -> String { format!("user:{id}:gemini_tokens") }
 }
 
 mod key_guild {
     pub fn messages(id: u64) -> String { format!("guild:{id}:messages") }
     pub fn commands(id: u64) -> String { format!("guild:{id}:commands") }
-    pub fn gemini(id: u64) -> String   { format!("guild:{id}:gemini") }
+    pub fn llm(id: u64) -> String      { format!("guild:{id}:gemini") }
 }
 
 fn key_command_name(name: &str) -> String {

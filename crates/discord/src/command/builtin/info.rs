@@ -30,7 +30,7 @@ impl Command for InfoCommand {
 
         let description = if id.application_description.is_empty() {
             "A multi-service Rust bot. Slash & prefix commands, Rhai scripting, \
-             auto-triggers, Gemini, gRPC control plane, web admin."
+             auto-triggers, multi-provider LLM router, gRPC control plane, web admin."
                 .to_string()
         } else {
             id.application_description.clone()
