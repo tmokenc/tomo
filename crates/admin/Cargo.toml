@@ -24,7 +24,6 @@ reqwest = { workspace = true }
 # Async / util
 async-trait = { workspace = true }
 chrono      = { workspace = true }
-flume       = { workspace = true }
 http        = "1"
 sha2        = { workspace = true }
 serde       = { workspace = true }
@@ -33,4 +32,3 @@ thiserror   = { workspace = true }
 time        = "0.3"
 tokio       = { workspace = true }
 tracing     = { workspace = true }
-url         = { workspace = true }

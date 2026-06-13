@@ -140,6 +140,11 @@ pub fn decode<T: DeserializeOwned>(raw: &[u8]) -> Option<T> {
 
 // ---------- background writer ----------
 
+/// How many times to re-attempt a failed batch before dropping it. The
+/// backend commit is atomic, so a transient failure (e.g. a momentarily full
+/// disk) leaves nothing applied and re-running the whole batch is safe.
+const WRITER_MAX_ATTEMPTS: usize = 4;
+
 pub fn spawn_writer(rx: flume::Receiver<WriteOp>, store: Arc<dyn KvStore>) {
     tokio::spawn(async move {
         loop {
@@ -152,8 +157,26 @@ pub fn spawn_writer(rx: flume::Receiver<WriteOp>, store: Arc<dyn KvStore>) {
                     break;
                 }
             }
-            if let Err(e) = store.batch(ops).await {
-                warn!(error = %e, "cache writer batch failed");
+            // Retry with exponential backoff. Dropping a batch silently is what
+            // resurrects deleted data on the next boot (a lost `Delete*`), so
+            // try hard before giving up rather than discarding on first error.
+            let mut attempt = 1;
+            loop {
+                match store.batch(ops.clone()).await {
+                    Ok(()) => break,
+                    Err(e) if attempt >= WRITER_MAX_ATTEMPTS => {
+                        warn!(error = %e, ops = ops.len(), attempts = attempt,
+                              "cache writer batch failed — giving up and dropping");
+                        break;
+                    }
+                    Err(e) => {
+                        let backoff = std::time::Duration::from_millis(50 * (1 << attempt));
+                        warn!(error = %e, attempt, backoff_ms = backoff.as_millis() as u64,
+                              "cache writer batch failed — retrying");
+                        tokio::time::sleep(backoff).await;
+                        attempt += 1;
+                    }
+                }
             }
         }
     });

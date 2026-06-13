@@ -388,9 +388,17 @@ impl Requester {
                 "type": media_type.graphql_value(),
             },
         });
-        let parsed: MediaResponse = self.post_graphql(&body).await?;
-        // AniList returns `errors: [{ message: "Not Found." }]` for missing
-        // media — treat that as `Ok(None)` rather than a hard error.
+        // AniList answers a missing id with HTTP 404 (verified) carrying a
+        // `{"errors":[{"message":"Not Found."}],"data":{"Media":null}}` body —
+        // `post_graphql` turns that non-2xx into `Error::Api { status: 404 }`,
+        // so map it to `Ok(None)` instead of surfacing "Lookup failed".
+        let parsed: MediaResponse = match self.post_graphql(&body).await {
+            Ok(p) => p,
+            Err(Error::Api { status: 404, .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        // Belt-and-suspenders: also handle a 200-with-errors "Not Found" shape
+        // in case AniList ever stops using the 404 status.
         if !parsed.errors.is_empty()
             && parsed.errors.iter().any(|e| e.message.contains("Not Found"))
         {

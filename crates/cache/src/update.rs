@@ -90,6 +90,47 @@ fn on_channel_upsert(cache: &PersistentCache, channel: &Channel) {
     }
 }
 
+/// Drop a channel's message index *and* the individual message entries it
+/// points at, from both memory and disk. The deque alone was being removed
+/// before, orphaning up to `message_cache_size` full message blobs per
+/// deleted channel — they accumulated forever (and were rehydrated on every
+/// boot).
+fn purge_channel_messages(cache: &PersistentCache, channel_id: Id<ChannelMarker>) {
+    if let Some((_, deque)) = cache.channel_messages.remove(&channel_id) {
+        for mid in deque {
+            cache.messages.remove(&mid);
+            cache.enqueue(WriteOp::DeleteMessage(mid));
+        }
+    }
+    cache.enqueue(WriteOp::DeleteChannelMessages(channel_id));
+}
+
+/// Evict a user once they share no remaining cached guild with us — mirrors
+/// twilight's reference-counted eviction. Without this every user the bot
+/// ever saw stayed pinned in memory and on disk for the process lifetime.
+///
+/// Like twilight, the ref-count is `user_guilds`, which only tracks guilds
+/// whose member list we actually received. If a user is in a second, large
+/// guild whose membership was never chunked, leaving the first guild can
+/// evict them prematurely. That's a self-healing cache *miss* — they're
+/// re-inserted on their next message or member event — and is strictly
+/// preferable to the unbounded growth of never evicting at all.
+fn maybe_evict_user(cache: &PersistentCache, user_id: Id<UserMarker>) {
+    // Read the ref-count in its own statement so the DashMap read guard is
+    // dropped before we take a write guard below (else same-shard deadlock).
+    let still_shares_a_guild = cache
+        .user_guilds
+        .get(&user_id)
+        .map(|g| !g.is_empty())
+        .unwrap_or(false);
+    if !still_shares_a_guild {
+        cache.user_guilds.remove(&user_id);
+        if cache.users.remove(&user_id).is_some() {
+            cache.enqueue(WriteOp::DeleteUser(user_id));
+        }
+    }
+}
+
 fn on_channel_delete(cache: &PersistentCache, channel: &Channel) {
     let id = channel.id;
     cache.channels.remove(&id);
@@ -98,9 +139,8 @@ fn on_channel_delete(cache: &PersistentCache, channel: &Channel) {
             entry.remove(&id);
         }
     }
-    cache.channel_messages.remove(&id);
     cache.enqueue(WriteOp::DeleteChannel(id));
-    cache.enqueue(WriteOp::DeleteChannelMessages(id));
+    purge_channel_messages(cache, id);
 }
 
 fn on_thread_delete(
@@ -114,8 +154,11 @@ fn on_thread_delete(
             entry.remove(&id);
         }
     }
-    cache.channel_messages.remove(&id);
     cache.enqueue(WriteOp::DeleteChannel(id));
+    // Previously this dropped the in-memory deque but never enqueued
+    // `DeleteChannelMessages`, orphaning the `cm:` row on disk *and* leaking
+    // the message blobs. `purge_channel_messages` fixes both.
+    purge_channel_messages(cache, id);
 }
 
 // ---------------- Guilds ----------------
@@ -275,9 +318,8 @@ fn on_guild_delete(cache: &PersistentCache, id: Id<GuildMarker>, _unavailable: b
     if let Some((_, channel_ids)) = cache.guild_channels.remove(&id) {
         for c in channel_ids {
             cache.channels.remove(&c);
-            cache.channel_messages.remove(&c);
             cache.enqueue(WriteOp::DeleteChannel(c));
-            cache.enqueue(WriteOp::DeleteChannelMessages(c));
+            purge_channel_messages(cache, c);
         }
     }
     if let Some((_, role_ids)) = cache.guild_roles.remove(&id) {
@@ -293,6 +335,7 @@ fn on_guild_delete(cache: &PersistentCache, id: Id<GuildMarker>, _unavailable: b
             if let Some(mut entry) = cache.user_guilds.get_mut(&u) {
                 entry.remove(&id);
             }
+            maybe_evict_user(cache, u);
         }
     }
     let _ = cache.guild_emojis.remove(&id);
@@ -375,6 +418,7 @@ fn on_member_remove(
     if let Some(mut entry) = cache.user_guilds.get_mut(&user_id) {
         entry.remove(&guild_id);
     }
+    maybe_evict_user(cache, user_id);
 }
 
 fn on_member_chunk(

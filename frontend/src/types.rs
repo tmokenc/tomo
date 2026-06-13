@@ -17,15 +17,15 @@ pub struct Status {
     pub uptime_seconds: i64,
     pub owners: Vec<u64>,
     pub bot_user_id: u64,
-    pub gemini_enabled: bool,
+    pub llm_enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
 pub struct GlobalStats {
     pub messages: u64,
     pub commands: u64,
-    pub gemini_calls: u64,
-    pub gemini_tokens: u64,
+    pub llm_calls: u64,
+    pub llm_tokens: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

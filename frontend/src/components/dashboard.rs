@@ -68,15 +68,15 @@ pub fn dashboard() -> Html {
                     {" · uptime "}
                     { format_uptime(s.uptime_seconds) }
                     {" · "}
-                    if s.gemini_enabled { "Gemini ✓" } else { "Gemini —" }
+                    if s.llm_enabled { "LLM ✓" } else { "LLM —" }
                 </div>
             }
 
             <div class="grid">
                 <Stat label="Messages seen"  value={stats.messages} />
                 <Stat label="Commands run"   value={stats.commands} />
-                <Stat label="Gemini calls"   value={stats.gemini_calls} />
-                <Stat label="Gemini tokens"  value={stats.gemini_tokens} />
+                <Stat label="LLM calls"      value={stats.llm_calls} />
+                <Stat label="LLM tokens"     value={stats.llm_tokens} />
             </div>
 
             <div class="card">

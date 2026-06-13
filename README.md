@@ -379,7 +379,7 @@ Every layer has tests. Notable coverage:
   `every_command_script_executes_without_error` smoke test that actually
   runs `execute(ctx)` on every shipped command.
 * `tomo-requester` — parser corner cases for VNDB and AniList helpers.
-* `tomo-gemini` — retry-delay parser (handles `47s`, `1.5s`, `1m30s`).
+* `tomo-llm` — retry-delay parser (handles `47s`, `1.5s`, `1m30s`).
 * `tomo-discord` — case-insensitive prefix matching, mention detection
   with content-scan fallback, VNDB id parsing in prose.
 

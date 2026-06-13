@@ -86,14 +86,28 @@ fn merge(mut lines: Vec<OcrLine>) -> Vec<OcrLine> {
         }
     }
 
-    kept.sort_by(|a, b| {
-        if (a.top - b.top).abs() <= ROW_TOLERANCE {
-            a.left.cmp(&b.left)
-        } else {
-            a.top.cmp(&b.top)
+    // Reading-order sort. A pairwise "within ROW_TOLERANCE → by left, else by
+    // top" compare is intransitive (for tops 0/5/10 with tolerance 8: A~B and
+    // B~C but not A~C) — illegal for `sort_by`. Fixed bands (top/TOLERANCE)
+    // are a total order but split a single visual row whenever two boxes
+    // straddle a band edge. Instead, cluster into rows: sort by top, open a
+    // new row whenever the gap to the previous line exceeds ROW_TOLERANCE,
+    // then order by (row, left). Total order, and close tops stay one row.
+    kept.sort_by_key(|l| l.top);
+    let mut indexed: Vec<(usize, OcrLine)> = Vec::with_capacity(kept.len());
+    let mut row = 0usize;
+    let mut prev_top: Option<i32> = None;
+    for line in kept {
+        if let Some(p) = prev_top {
+            if line.top - p > ROW_TOLERANCE {
+                row += 1;
+            }
         }
-    });
-    kept
+        prev_top = Some(line.top);
+        indexed.push((row, line));
+    }
+    indexed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.left.cmp(&b.1.left)));
+    indexed.into_iter().map(|(_, line)| line).collect()
 }
 
 fn run_one(engine: &OcrEngine, image: &DynamicImage, name: &'static str) -> Result<Vec<OcrLine>> {
@@ -225,6 +239,20 @@ mod tests {
         let lines = vec![
             line("RIGHT", 0.9, 50, 10, 40, 20),
             line("LEFT", 0.9, 0, 12, 40, 20), // small top jitter — same row.
+        ];
+        let merged = merge(lines);
+        assert_eq!(merged[0].text, "LEFT");
+        assert_eq!(merged[1].text, "RIGHT");
+    }
+
+    #[test]
+    fn merge_same_row_across_band_boundary() {
+        // tops 7 and 8 straddle a multiple of ROW_TOLERANCE (8). Fixed bands
+        // would split them into different rows and mis-order them; row
+        // clustering keeps them on one row, read left-to-right.
+        let lines = vec![
+            line("RIGHT", 0.9, 50, 8, 40, 20),
+            line("LEFT", 0.9, 0, 7, 40, 20),
         ];
         let merged = merge(lines);
         assert_eq!(merged[0].text, "LEFT");

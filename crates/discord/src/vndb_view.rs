@@ -111,6 +111,7 @@ fn strip_bbcode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'[' {
+            // (`[` is ASCII, so `i` is always at a char boundary here.)
             if let Some(close) = s[i..].find(']') {
                 let tag = &s[i + 1..i + close];
                 // Keep `[url=...]anchor[/url]` as just the anchor text.
@@ -133,8 +134,12 @@ fn strip_bbcode(s: &str) -> String {
                 }
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Push the whole UTF-8 character at `i` and advance by its width.
+        // `bytes[i] as char` would mangle any multi-byte char (VNDB
+        // descriptions routinely carry Japanese titles, accents, em-dashes).
+        let ch = s[i..].chars().next().expect("i is at a char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -159,5 +164,15 @@ mod tests {
     #[test]
     fn drops_spoiler() {
         assert_eq!(strip_bbcode("[spoiler]big reveal[/spoiler]"), "big reveal");
+    }
+
+    #[test]
+    fn preserves_multibyte_text() {
+        // Used to become Latin-1 mojibake via `byte as char`.
+        assert_eq!(strip_bbcode("こんにちは [b]世界[/b]！"), "こんにちは 世界！");
+        assert_eq!(
+            strip_bbcode("café [spoiler]résumé—dash[/spoiler]"),
+            "café résumé—dash",
+        );
     }
 }

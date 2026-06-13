@@ -6,13 +6,13 @@ use std::sync::LazyLock;
 
 use async_trait::async_trait;
 
-use tomo_core::error::{Error, Result};
+use tomo_core::error::Result;
 use tomo_embed::Embed2;
 use tomo_requester::nhentai::parse_gallery_id;
 
 use crate::command::{Command, CommandContext, CommandMeta, InvocationSource};
 use crate::nhentai_view::gallery_embed;
-use crate::util::cache_pick_from_human;
+use crate::util::{cache_pick_from_human, message_only_links_to, suppress_embeds};
 
 pub struct NhentaiCommand;
 
@@ -42,6 +42,11 @@ impl Command for NhentaiCommand {
             .await;
         };
 
+        // Slash: acknowledge immediately — the scrape can exceed Discord's 3s
+        // initial-response window. Prefix: defer is a no-op.
+        if ctx.is_slash() {
+            let _ = ctx.defer().await;
+        }
         let _ = ctx.bot.http.create_typing_trigger(ctx.channel_id()).await;
         let gallery = match ctx.bot.requester.nhentai(id).await {
             Ok(g) => g,
@@ -57,13 +62,17 @@ impl Command for NhentaiCommand {
             }
         };
 
-        let embed = gallery_embed(&gallery, ctx.author()).build();
-        ctx.bot
-            .http
-            .create_message(ctx.channel_id())
-            .embeds(std::slice::from_ref(&embed))
-            .await
-            .map_err(|e| Error::config(format!("nhentai send: {e}")))?;
+        // Routes to an interaction followup for slash (we deferred above) or a
+        // normal reply for prefix — either way the invocation is acknowledged.
+        ctx.reply_embed(&gallery_embed(&gallery, ctx.author())).await?;
+        // If the user pasted an `nhentai.net/g/<id>/` URL with a prefix
+        // invocation, hide Discord's auto-preview now that we've posted
+        // our own embed.
+        if let InvocationSource::Prefix { msg, .. } = &ctx.source {
+            if message_only_links_to(&msg.content, &["nhentai.net"]) {
+                suppress_embeds(&ctx.bot, msg.channel_id, msg.id).await;
+            }
+        }
         Ok(())
     }
 }

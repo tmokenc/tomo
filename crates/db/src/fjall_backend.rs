@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
@@ -22,6 +22,11 @@ pub struct FjallStore {
 struct Inner {
     db: Database,
     keyspaces: RwLock<HashMap<String, Keyspace>>,
+    /// Serializes the read-modify-write in [`increment_blocking`] so the
+    /// trait's "atomically adds" contract holds even with concurrent callers
+    /// (today only the single stats writer increments, but the lock removes
+    /// the latent lost-update footgun for any future caller).
+    inc_lock: Mutex<()>,
 }
 
 impl FjallStore {
@@ -37,7 +42,13 @@ impl FjallStore {
         })
         .await
         .map_err(|e| DbError::Backend(format!("spawn_blocking: {e}")))??;
-        Ok(Self { inner: Arc::new(Inner { db, keyspaces: RwLock::new(HashMap::new()) }) })
+        Ok(Self {
+            inner: Arc::new(Inner {
+                db,
+                keyspaces: RwLock::new(HashMap::new()),
+                inc_lock: Mutex::new(()),
+            }),
+        })
     }
 
     fn keyspace(&self, name: &str) -> DbResult<Keyspace> {
@@ -117,9 +128,16 @@ impl KvStore for FjallStore {
 
     async fn increment(&self, partition: &str, key: Bytes, by: u64) -> DbResult<u64> {
         let ks = self.keyspace(partition)?;
-        task::spawn_blocking(move || increment_blocking(&ks, key.as_ref(), by))
-            .await
-            .map_err(|e| DbError::Backend(format!("spawn_blocking: {e}")))?
+        let inner = Arc::clone(&self.inner);
+        task::spawn_blocking(move || {
+            let _guard = inner
+                .inc_lock
+                .lock()
+                .map_err(|_| DbError::Backend("increment lock poisoned".into()))?;
+            increment_blocking(&ks, key.as_ref(), by)
+        })
+        .await
+        .map_err(|e| DbError::Backend(format!("spawn_blocking: {e}")))?
     }
 
     async fn batch(&self, ops: Vec<KvOp>) -> DbResult<()> {
@@ -128,23 +146,43 @@ impl KvStore for FjallStore {
         }
         let store = Arc::clone(&self.inner);
         task::spawn_blocking(move || {
+            // Collect blind writes into one atomic `WriteBatch`. Previously ops
+            // were applied one-by-one, so a mid-batch failure left earlier ops
+            // committed and later ones dropped — splitting paired writes (e.g.
+            // a `DeleteChannel` landing without its `DeleteChannelMessages`,
+            // resurrecting data). `commit()` now applies all-or-nothing.
+            let mut wb = store.db.batch();
+            let mut has_writes = false;
             for op in ops {
                 match op {
                     KvOp::Insert { partition, key, value } => {
                         let ks = open_keyspace_blocking(&store, &partition)?;
-                        ks.insert(key.as_ref(), value.as_ref())
-                            .map_err(|e| DbError::Backend(format!("insert: {e}")))?;
+                        wb.insert(&ks, key.as_ref(), value.as_ref());
+                        has_writes = true;
                     }
                     KvOp::Remove { partition, key } => {
                         let ks = open_keyspace_blocking(&store, &partition)?;
-                        ks.remove(key.as_ref())
-                            .map_err(|e| DbError::Backend(format!("remove: {e}")))?;
+                        wb.remove(&ks, key.as_ref());
+                        has_writes = true;
                     }
                     KvOp::Increment { partition, key, by } => {
+                        // A read-modify-write can't be expressed in a blind
+                        // write batch; apply it directly under the increment
+                        // lock. Cache batches are pure insert/remove and the
+                        // stats writer's batches are increment-only, so no
+                        // paired write is split by handling these separately.
                         let ks = open_keyspace_blocking(&store, &partition)?;
+                        let _guard = store
+                            .inc_lock
+                            .lock()
+                            .map_err(|_| DbError::Backend("increment lock poisoned".into()))?;
                         increment_blocking(&ks, key.as_ref(), by)?;
                     }
                 }
+            }
+            if has_writes {
+                wb.commit()
+                    .map_err(|e| DbError::Backend(format!("batch commit: {e}")))?;
             }
             Ok::<_, DbError>(())
         })

@@ -162,6 +162,34 @@ async fn fire_due(bot: &Bot) -> Result<()> {
 
 async fn deliver(bot: &Bot, r: &Reminder) -> Result<()> {
     let user_id: Id<UserMarker> = Id::new(r.user_id);
+    let set_at = DateTime::from_timestamp(r.when_unix, 0)
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| "(unknown)".into());
+    let body = format!(
+        "⏰ **Reminder!**\n{}\n\nWas set to fire at `{set_at}`.",
+        r.content
+    );
+
+    // Preferred path: DM the user.
+    if let Err(dm_err) = try_dm(bot, user_id, &body).await {
+        // Very common: the user has server DMs disabled (50007). Rather than
+        // silently dropping the reminder, fall back to the channel it was set
+        // in and ping them there. Bounded — one fallback attempt, then the
+        // caller removes the row regardless.
+        debug!(id = r.id, error = %dm_err, "reminder DM failed — falling back to origin channel");
+        let channel_id = Id::new(r.channel_id);
+        let mentioned = format!("<@{}> {body}", r.user_id);
+        bot.http
+            .create_message(channel_id)
+            .content(&mentioned)
+            .await
+            .map_err(|e| Error::config(format!("reminder channel fallback: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Open (or reuse) the user's DM channel and post `body` there.
+async fn try_dm(bot: &Bot, user_id: Id<UserMarker>, body: &str) -> Result<()> {
     let channel = bot
         .http
         .create_private_channel(user_id)
@@ -170,19 +198,9 @@ async fn deliver(bot: &Bot, r: &Reminder) -> Result<()> {
         .model()
         .await
         .map_err(|e| Error::config(format!("decode dm channel: {e}")))?;
-
-    let set_at = DateTime::from_timestamp(r.when_unix, 0)
-        .map(|t| t.to_rfc3339())
-        .unwrap_or_else(|| "(unknown)".into());
-
-    let body = format!(
-        "⏰ **Reminder!**\n{}\n\nWas set to fire at `{set_at}`.",
-        r.content
-    );
-
     bot.http
         .create_message(channel.id)
-        .content(&body)
+        .content(body)
         .await
         .map_err(|e| Error::config(format!("send reminder: {e}")))?;
     Ok(())

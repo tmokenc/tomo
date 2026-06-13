@@ -173,10 +173,10 @@ impl LlmRouter {
 
     /// Send `turns` to whichever (provider, model) entry is currently
     /// available. Walks the chain in order, skipping entries with live
-    /// cooldowns. On 429 the entry is parked and the next one is tried;
-    /// non-quota errors short-circuit. Returns
-    /// [`GenerateError::QuotaExceeded`] only when *every* entry has just
-    /// refused or is cooled down.
+    /// cooldowns. On **any** error the entry is parked for
+    /// [`GenerateError::cooldown_hint`] (capped at [`MAX_COOLDOWN`]) and
+    /// the next entry is tried; the last error is held back and only
+    /// surfaced once every entry refuses.
     pub async fn generate(
         &self,
         turns: &[Turn],
@@ -192,7 +192,7 @@ impl LlmRouter {
         };
 
         let now = Instant::now();
-        let mut last_429: Option<(String, String)> = None;
+        let mut last_err: Option<GenerateError> = None;
 
         for entry in &self.entries {
             let key = entry.key();
@@ -220,32 +220,50 @@ impl LlmRouter {
                         model_used: entry.model.clone(),
                     });
                 }
-                Err(GenerateError::QuotaExceeded { retry_after, .. }) => {
-                    let park = retry_after.min(MAX_COOLDOWN);
+                Err(e) => {
+                    let park = e.cooldown_hint().min(MAX_COOLDOWN);
                     self.park(&key, park);
-                    last_429 = Some(key);
-                    info!(
-                        provider = %entry.provider.name(),
-                        model = %entry.model,
-                        cooldown_s = park.as_secs(),
-                        "router: entry rate-limited, rotating to next in chain"
-                    );
+                    let kind = error_kind(&e);
+                    // 429 is the expected rotation case → info; everything
+                    // else is worth a louder warn so operators notice
+                    // when a model is misconfigured or a provider is down.
+                    if matches!(e, GenerateError::QuotaExceeded { .. }) {
+                        info!(
+                            provider = %entry.provider.name(),
+                            model = %entry.model,
+                            cooldown_s = park.as_secs(),
+                            "router: entry rate-limited, rotating to next in chain"
+                        );
+                    } else {
+                        warn!(
+                            provider = %entry.provider.name(),
+                            model = %entry.model,
+                            cooldown_s = park.as_secs(),
+                            kind = kind,
+                            error = %e,
+                            "router: entry failed, rotating to next in chain"
+                        );
+                    }
+                    last_err = Some(e);
                     continue;
                 }
-                Err(e) => return Err(e),
             }
         }
 
-        if let Some((p, m)) = last_429 {
-            warn!(last_provider = %p, last_model = %m, "router: every entry refused — giving up");
-        } else {
-            debug!("router: every entry was already cooled-down at request time");
+        match last_err {
+            Some(e) => {
+                warn!(error = %e, "router: every entry refused — giving up");
+                Err(e)
+            }
+            None => {
+                debug!("router: every entry was already cooled-down at request time");
+                Err(GenerateError::QuotaExceeded {
+                    provider: "router".into(),
+                    model: "*".into(),
+                    retry_after: Duration::from_secs(60),
+                })
+            }
         }
-        Err(GenerateError::QuotaExceeded {
-            provider: "router".into(),
-            model: "*".into(),
-            retry_after: Duration::from_secs(60),
-        })
     }
 
     fn cooldown_remaining(
@@ -262,5 +280,21 @@ impl LlmRouter {
         if let Ok(mut map) = self.cooldowns.lock() {
             map.insert(key.clone(), until);
         }
+    }
+}
+
+/// Short tag describing the failure class — purely for log scannability.
+/// Keeps the `warn!` line a tidy single key=value pair instead of a long
+/// `Debug`-formatted enum.
+fn error_kind(e: &GenerateError) -> &'static str {
+    match e {
+        GenerateError::Transport(_) => "transport",
+        GenerateError::Decode(_) => "decode",
+        GenerateError::QuotaExceeded { .. } => "quota",
+        GenerateError::Api { status, .. } if *status == 404 => "model_not_found",
+        GenerateError::Api { status, .. } if (400..500).contains(status) => "client_error",
+        GenerateError::Api { .. } => "server_error",
+        GenerateError::Build(_) => "build",
+        GenerateError::NoProviders => "no_providers",
     }
 }

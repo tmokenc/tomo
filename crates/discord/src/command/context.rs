@@ -4,6 +4,8 @@ use std::time::Instant;
 use twilight_model::application::interaction::application_command::CommandData;
 use twilight_model::application::interaction::Interaction;
 use twilight_model::channel::Message;
+use twilight_model::channel::message::MessageFlags;
+use twilight_model::http::attachment::Attachment;
 use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
 use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, GuildMarker, MessageMarker, UserMarker};
@@ -131,6 +133,40 @@ impl CommandContext {
         matches!(self.source, InvocationSource::Slash { .. })
     }
 
+    /// The underlying interaction for a slash invocation, or `None` for a
+    /// prefix one. Lets components that live outside the context (e.g. the
+    /// paginator) post through the interaction so the slash command is
+    /// actually acknowledged.
+    pub fn interaction(&self) -> Option<&Interaction> {
+        match &self.source {
+            InvocationSource::Slash { interaction, .. } => Some(interaction),
+            InvocationSource::Prefix { .. } => None,
+        }
+    }
+
+    /// Acknowledge a *denied* slash invocation with a private (ephemeral)
+    /// message so the user sees why instead of Discord's red "The application
+    /// did not respond". A no-op for prefix invocations — denials there stay
+    /// silent, matching the bot's long-standing behaviour.
+    pub async fn deny_ephemeral(&self, content: &str) -> Result<()> {
+        let Some(interaction) = self.interaction() else { return Ok(()) };
+        let data = InteractionResponseDataBuilder::new()
+            .flags(MessageFlags::EPHEMERAL)
+            .content(content.to_string())
+            .build();
+        let response = InteractionResponse {
+            kind: InteractionResponseType::ChannelMessageWithSource,
+            data: Some(data),
+        };
+        let client = self.bot.http.interaction(interaction.application_id);
+        client
+            .create_response(interaction.id, &interaction.token, &response)
+            .await
+            .map_err(|e| Error::config(format!("deny_ephemeral: {e}")))?;
+        self.responded.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Send a plain text response.
     pub async fn reply(&self, content: &str) -> Result<()> {
         match &self.source {
@@ -223,6 +259,56 @@ impl CommandContext {
             .await
             .map_err(|e| Error::config(format!("respond: {e}")))?;
         Ok(())
+    }
+
+    /// Send an embed plus file attachments. Routes the same way as
+    /// [`Self::reply_embed`]: a real reply for prefix, an interaction
+    /// response/followup for slash (so the interaction is acknowledged
+    /// instead of left hanging). Used by commands like `qr` that ship a PNG.
+    pub async fn reply_embed_with_attachments(
+        &self,
+        embed: &impl Embedable,
+        attachments: &[Attachment],
+    ) -> Result<()> {
+        let embed = embed.build_embed();
+        match &self.source {
+            InvocationSource::Prefix { msg, .. } => {
+                self.bot
+                    .http
+                    .create_message(msg.channel_id)
+                    .embeds(std::slice::from_ref(&embed))
+                    .attachments(attachments)
+                    .reply(msg.id)
+                    .await
+                    .map_err(|e| Error::config(format!("send: {e}")))?;
+                Ok(())
+            }
+            InvocationSource::Slash { interaction, .. } => {
+                let client = self.bot.http.interaction(interaction.application_id);
+                if self.take_responded() {
+                    client
+                        .create_followup(&interaction.token)
+                        .embeds(std::slice::from_ref(&embed))
+                        .attachments(attachments)
+                        .await
+                        .map_err(|e| Error::config(format!("followup: {e}")))?;
+                    return Ok(());
+                }
+                let data = InteractionResponseDataBuilder::new()
+                    .embeds([embed])
+                    .attachments(attachments.iter().cloned())
+                    .build();
+                let response = InteractionResponse {
+                    kind: InteractionResponseType::ChannelMessageWithSource,
+                    data: Some(data),
+                };
+                client
+                    .create_response(interaction.id, &interaction.token, &response)
+                    .await
+                    .map_err(|e| Error::config(format!("respond: {e}")))?;
+                Ok(())
+            }
+        }
     }
 
     /// Send a `Modal` interaction response. Slash-only — for prefix

@@ -9,6 +9,4 @@ license.workspace = true
 [dependencies]
 twilight-model = { workspace = true }
 twilight-util  = { workspace = true }
-twilight-validate = { workspace = true }
 chrono   = { workspace = true }
-url      = { workspace = true }

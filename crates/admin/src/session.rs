@@ -49,7 +49,10 @@ impl Session {
 
 pub fn clear_cookie<'a>(name: &'a str) -> Cookie<'a> {
     let mut cookie = Cookie::new(name, "");
-    cookie.set_path("/");
+    // A removal cookie's path must match the path it was *set* with, or the
+    // browser keeps the original. The state cookie is scoped to `/oauth`
+    // (see `OauthFlow::to_cookie`); everything else uses `/`.
+    cookie.set_path(if name == STATE_COOKIE { "/oauth" } else { "/" });
     cookie.set_http_only(true);
     cookie.set_same_site(SameSite::Lax);
     cookie.set_max_age(time::Duration::seconds(0));

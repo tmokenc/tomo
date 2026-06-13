@@ -13,10 +13,12 @@ use std::env;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use tokio::signal;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -68,9 +70,14 @@ async fn main() -> anyhow::Result<()> {
     let mut services: Vec<Box<dyn Service>> = Vec::new();
     services.push(Box::new(discord));
 
-    // gRPC server — always enabled when the admin service is, and useful on
-    // its own for ad-hoc tooling (grpcurl, etc.).
-    if rpc_enabled() {
+    // gRPC server — the admin web UI reaches the bot exclusively over this
+    // gRPC surface, so force it on when admin is enabled (otherwise the admin
+    // service starts but can never talk to the bot). Also useful standalone
+    // for ad-hoc tooling (grpcurl, etc.).
+    if rpc_enabled() || AdminConfig::enabled() {
+        if !rpc_enabled() {
+            info!("admin service enabled — starting RPC server it depends on");
+        }
         let rpc_cfg = rpc_config_from_env()?;
         info!(bind = %rpc_cfg.bind, "starting RPC service");
         services.push(Box::new(RpcService::new(bot.clone(), rpc_cfg)));
@@ -89,25 +96,53 @@ async fn main() -> anyhow::Result<()> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let mut handles = Vec::new();
+    // Spawn every service into a JoinSet so they can be *supervised*. A
+    // service's `run` is expected to block until shutdown; if one returns
+    // early — cleanly or with an error — the bot is degraded (e.g. the gateway
+    // got a fatal close like 4014 "disallowed intents", or the RPC listener
+    // failed to bind). Leaving the process up in that state is the zombie bug:
+    // no gateway, but a live RPC/admin surface still reporting healthy. So an
+    // early exit tears the whole process down, exactly as a signal would.
+    let mut set: JoinSet<&'static str> = JoinSet::new();
     for svc in services {
         let name = svc.name();
         let rx = shutdown_rx.clone();
-        handles.push(tokio::spawn(async move {
-            if let Err(e) = svc.run(rx).await {
-                error!(service = name, error = %e, "service exited with error");
-            } else {
-                info!(service = name, "service exited cleanly");
+        set.spawn(async move {
+            match svc.run(rx).await {
+                Ok(()) => info!(service = name, "service exited cleanly"),
+                Err(e) => error!(service = name, error = %e, "service exited with error"),
             }
-        }));
+            name
+        });
     }
 
-    wait_for_signal().await;
-    info!("shutdown signal received");
+    tokio::select! {
+        _ = wait_for_signal() => {
+            info!("shutdown signal received");
+        }
+        joined = set.join_next() => match joined {
+            Some(Ok(name)) => {
+                warn!(service = name, "service exited before shutdown — stopping the bot");
+            }
+            Some(Err(e)) => {
+                error!(error = %e, "a service task panicked — stopping the bot");
+            }
+            None => warn!("no services were running — nothing to do"),
+        },
+    }
+
     let _ = shutdown_tx.send(true);
 
-    for handle in handles {
-        let _ = handle.await;
+    // Drain the remaining services, bounded so a wedged one can't hang exit.
+    let drain = async {
+        while let Some(joined) = set.join_next().await {
+            if let Err(e) = joined {
+                warn!(error = %e, "service task join error during shutdown");
+            }
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(10), drain).await.is_err() {
+        warn!("services did not all stop within 10s — exiting anyway");
     }
 
     info!("tomo shut down");

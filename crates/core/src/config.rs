@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 use twilight_model::id::Id;
 use twilight_model::id::marker::{GuildMarker, UserMarker};
 
@@ -259,7 +260,12 @@ fn default_models_for(provider: &str) -> Vec<String> {
         ],
         "cerebras" => vec![
             // cerebras.ai — free tier: ~1.7K RPD, 60K tok/min.
-            "llama-3.3-70b".into(),
+            // Verified by probing /v1/chat/completions on 2026-05-12: the
+            // /v1/models endpoint advertises 4 entries but only these two
+            // are actually callable with a free-tier key — the others
+            // (`gpt-oss-120b`, `zai-glm-4.7`) return 403 `model_not_found`
+            // unless you're on a paid plan.
+            "qwen-3-235b-a22b-instruct-2507".into(),
             "llama3.1-8b".into(),
         ],
         "openrouter" => vec![
@@ -418,13 +424,33 @@ fn optional(key: &str) -> Option<String> {
 }
 
 fn bool_env(key: &str, default: bool) -> bool {
-    optional(key)
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(default)
+    match optional(key) {
+        None => default,
+        Some(v) => match v.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            // Previously *anything* unrecognized silently became `false`,
+            // which could disable a default-true toggle (e.g.
+            // `TOMO_ENABLE_LLM=maybe`). Warn and keep the default instead.
+            other => {
+                warn!(key, value = other, default, "unrecognized boolean env value — using default");
+                default
+            }
+        },
+    }
 }
 
 fn parse_env<T: FromStr>(key: &str, default: T) -> T {
-    optional(key).and_then(|v| v.parse().ok()).unwrap_or(default)
+    match optional(key) {
+        None => default,
+        Some(v) => match v.parse() {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                warn!(key, value = %v, "could not parse env value — using default");
+                default
+            }
+        },
+    }
 }
 
 fn ocr_files(det: &str, rec: &str, keys: &str) -> Option<OcrEngineFiles> {

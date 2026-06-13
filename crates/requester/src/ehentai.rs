@@ -28,6 +28,11 @@ pub struct EhentaiGallery {
     pub rating: String,
     pub torrentcount: String,
     pub tags: Vec<String>,
+    /// Set (to a message) when E-Hentai couldn't resolve this gidlist entry —
+    /// it returns `{"gid":N,"error":"..."}` instead of omitting it. Used to
+    /// drop the entry rather than render a bogus default-filled gallery.
+    #[serde(skip_serializing)]
+    pub error: Option<String>,
 }
 
 impl EhentaiGallery {
@@ -77,7 +82,14 @@ impl Requester {
             .await?
             .error_for_status()?;
         let parsed: GmetadataResponse = resp.json().await.map_err(|e| Error::Decode(e.to_string()))?;
-        Ok(parsed.gmetadata)
+        // Drop entries E-Hentai couldn't resolve (`{"gid":N,"error":...}`),
+        // which would otherwise decode — via `#[serde(default)]` — into a
+        // gallery with an empty token and a broken `/g/N//` URL.
+        Ok(parsed
+            .gmetadata
+            .into_iter()
+            .filter(|g| g.error.is_none() && !g.token.is_empty())
+            .collect())
     }
 }
 
@@ -106,4 +118,34 @@ pub fn parse_ids(input: &str) -> Vec<EhentaiId> {
     out.sort();
     out.dedup();
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drops_error_entries_keeps_good_ones() {
+        // E-Hentai returns an `error` entry for an unresolved id; with
+        // `#[serde(default)]` it used to decode into a token-less gallery.
+        let raw = r#"{"gmetadata":[
+            {"gid":1,"token":"abc1230000","title":"Good"},
+            {"gid":2,"error":"Key missing, or incorrect key provided."}
+        ]}"#;
+        let parsed: GmetadataResponse = serde_json::from_str(raw).unwrap();
+        let kept: Vec<_> = parsed
+            .gmetadata
+            .into_iter()
+            .filter(|g| g.error.is_none() && !g.token.is_empty())
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].gid, 1);
+        assert_eq!(kept[0].token, "abc1230000");
+    }
+
+    #[test]
+    fn parse_ids_extracts_url_and_bare_forms() {
+        let ids = parse_ids("g/123/deadbeef0 and https://e-hentai.org/g/456/cafe1234/");
+        assert_eq!(ids, vec![(123, "deadbeef0".into()), (456, "cafe1234".into())]);
+    }
 }

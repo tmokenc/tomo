@@ -13,10 +13,8 @@ fjall-backend = ["dep:fjall"]
 [dependencies]
 tomo-core = { workspace = true }
 
-anyhow      = { workspace = true }
 async-trait = { workspace = true }
 bytes       = { workspace = true }
-flume       = { workspace = true }
 serde       = { workspace = true }
 thiserror   = { workspace = true }
 tokio       = { workspace = true }

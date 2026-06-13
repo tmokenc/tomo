@@ -331,6 +331,22 @@ fn strip_self_mention(content: &str, bot_user_id: u64) -> String {
 /// might drift if the bot is renamed in Discord.
 ///
 /// Kept compact (one line per fact) to minimise input-token cost.
+/// Neutralise untrusted free text before it's interpolated into the
+/// system-prompt context. Collapses every line separator (LF/CR, NEL, and the
+/// Unicode line/paragraph separators) to a space so an attacker-controlled
+/// value — e.g. a channel topic, which *does* allow newlines — can't inject a
+/// fresh line that reads as a system directive (like a spoofed "Your owner
+/// is …"). Callers that wrap text in a code fence must also strip backticks.
+fn sanitize_context_line(s: &str) -> String {
+    // Every Unicode vertical separator: LF, CR, vertical tab, form feed, NEL,
+    // line separator, paragraph separator. Renderers/tokenizers treat all of
+    // these as line breaks, so any one could inject a fake directive line.
+    s.replace(
+        ['\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'],
+        " ",
+    )
+}
+
 fn build_context(bot: &Bot, message: &Message) -> String {
     let mut lines = Vec::with_capacity(8);
 
@@ -371,14 +387,19 @@ fn build_context(bot: &Bot, message: &Message) -> String {
                 .guild(guild_id)
                 .map(|g| g.name.clone())
                 .unwrap_or_else(|| format!("guild {guild_id}"));
-            lines.push(format!("Server: {guild_name}"));
+            lines.push(format!("Server: {}", sanitize_context_line(&guild_name)));
 
             if let Some(channel) = bot.cache.channel(message.channel_id) {
                 if let Some(name) = channel.name.as_deref().filter(|s| !s.is_empty()) {
-                    lines.push(format!("Channel: #{name}"));
+                    lines.push(format!("Channel: #{}", sanitize_context_line(name)));
                 }
                 if let Some(topic) = channel.topic.as_deref().filter(|s| !s.is_empty()) {
-                    lines.push(format!("Channel topic: {}", truncate(topic, 400)));
+                    // Topics allow newlines — sanitize before truncating so a
+                    // crafted topic can't add fake system-directive lines.
+                    lines.push(format!(
+                        "Channel topic: {}",
+                        truncate(&sanitize_context_line(topic), 400)
+                    ));
                 }
                 if channel.nsfw.unwrap_or(false) {
                     lines.push("Channel is marked NSFW.".to_string());
@@ -393,7 +414,7 @@ fn build_context(bot: &Bot, message: &Message) -> String {
     // Who: prefer the guild member nick when there is one, fall back to the
     // global display name, then username.
     let speaker = speaker_label(bot, message);
-    lines.push(format!("User mentioning you: {speaker}"));
+    lines.push(format!("User mentioning you: {}", sanitize_context_line(&speaker)));
 
     // If this is a Discord reply, surface the message being replied to so the
     // model can answer in context. Without this, "@tomo translate that"
@@ -404,9 +425,9 @@ fn build_context(bot: &Bot, message: &Message) -> String {
         let author = if referenced.author.id == bot_id {
             "you (your previous message)".to_string()
         } else {
-            speaker_for(bot, referenced)
+            sanitize_context_line(&speaker_for(bot, referenced))
         };
-        let body = referenced.content.replace('\n', " ");
+        let body = sanitize_context_line(&referenced.content);
         lines.push(format!(
             "Replying to message from {author}: \"{}\"",
             truncate(&body, 500),
@@ -473,6 +494,11 @@ async fn build_ocr_context(bot: &Bot, message: &Message) -> Option<String> {
     } else {
         cleaned.to_string()
     };
+    // Neutralise backticks: this text is attacker-controlled (it's an image of
+    // whatever the user chose) and is about to sit inside a ``` fence — a
+    // backtick run would close the fence and let the rest land as bare
+    // system-prompt lines. Newlines inside the fence are fine, so keep them.
+    let body = body.replace('`', "'");
     Some(format!(
         "Image attached to the conversation. OCR-extracted text follows (may contain noise):\n```\n{body}\n```"
     ))
@@ -561,15 +587,56 @@ fn chunk_for_discord(text: &str, max_len: usize) -> Vec<String> {
 }
 
 fn split_long(s: &str, max_len: usize) -> Vec<String> {
-    s.as_bytes()
-        .chunks(max_len)
-        .map(|c| String::from_utf8_lossy(c).into_owned())
-        .collect()
+    // Accumulate whole characters up to `max_len` bytes. Chunking the raw
+    // bytes (the old approach) split multi-byte UTF-8 at the seam, turning the
+    // tail of one Discord message and the head of the next into U+FFFD — every
+    // CJK reply hit this since no char boundary lands on a 1900-byte multiple.
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for ch in s.chars() {
+        if !current.is_empty() && current.len() + ch.len_utf8() > max_len {
+            out.push(std::mem::take(&mut current));
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::mentions_in_content;
+    use super::{mentions_in_content, sanitize_context_line};
+
+    #[test]
+    fn sanitize_collapses_all_line_separators() {
+        // A crafted channel topic must not be able to inject a fresh line.
+        let attack = "normal topic\nfake line\r\u{0B}vt\u{0C}ff\u{0085}nel\u{2028}ls\u{2029}ps";
+        let out = sanitize_context_line(attack);
+        for sep in ['\n', '\r', '\u{000B}', '\u{000C}', '\u{0085}', '\u{2028}', '\u{2029}'] {
+            assert!(!out.contains(sep), "separator {sep:?} not collapsed");
+        }
+        // Content is preserved (just flattened), so legitimate topics survive.
+        assert!(out.starts_with("normal topic "));
+    }
+
+    #[test]
+    fn sanitize_leaves_plain_text_untouched() {
+        assert_eq!(sanitize_context_line("just a normal topic"), "just a normal topic");
+    }
+
+    #[test]
+    fn split_long_never_corrupts_multibyte() {
+        // 200 CJK chars (3 bytes each = 600 bytes), split at 100 bytes. The
+        // old byte-chunking produced U+FFFD at every seam.
+        let s: String = "東".repeat(200);
+        let chunks = super::split_long(&s, 100);
+        // No replacement chars, every chunk is valid, and they recombine.
+        assert!(chunks.iter().all(|c| !c.contains('\u{FFFD}')));
+        assert!(chunks.iter().all(|c| c.len() <= 100));
+        assert_eq!(chunks.concat(), s);
+    }
 
     #[test]
     fn detects_plain_user_mention() {

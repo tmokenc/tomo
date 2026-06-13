@@ -5,10 +5,11 @@ pub use tomo_embed::truncate;
 
 use bytes::Bytes;
 use tokio::task;
-use tracing::warn;
+use tracing::{debug, warn};
+use twilight_model::channel::message::MessageFlags;
 use twilight_model::channel::{Attachment, Message};
 use twilight_model::id::Id;
-use twilight_model::id::marker::{ChannelMarker, UserMarker};
+use twilight_model::id::marker::{ChannelMarker, MessageMarker, UserMarker};
 
 use tomo_core::error::{Error, Result};
 
@@ -197,4 +198,136 @@ pub async fn ocr_bytes(engines: Vec<OcrSlot>, bytes: Bytes) -> Result<String> {
         .await
         .map_err(|e| Error::config(format!("ocr join: {e}")))??;
     Ok(ocr_merge::render(&lines))
+}
+
+/// Strip Discord's auto-generated link previews from a user's message.
+/// The gallery commands and their auto-triggers call this after posting
+/// their own rich embed, so a `https://vndb.org/v123` paste doesn't end
+/// up rendered twice (once by Discord, once by us).
+///
+/// Requires Manage Messages on the channel — the bot is editing someone
+/// *else's* message. Failures are logged at debug and otherwise ignored
+/// because losing the suppression doesn't break anything user-visible.
+pub async fn suppress_embeds(
+    bot: &Bot,
+    channel_id: Id<ChannelMarker>,
+    message_id: Id<MessageMarker>,
+) {
+    if let Err(e) = bot
+        .http
+        .update_message(channel_id, message_id)
+        .flags(MessageFlags::SUPPRESS_EMBEDS)
+        .await
+    {
+        debug!(
+            channel = %channel_id,
+            message = %message_id,
+            error = %e,
+            "suppress_embeds failed (missing Manage Messages?)",
+        );
+    }
+}
+
+/// Whether *every* URL in `content` points at one of `domains` (and there is
+/// at least one URL). Gates [`suppress_embeds`]: Discord's `SUPPRESS_EMBEDS`
+/// flag hides **all** of a message's embeds, not just one, so we must only
+/// suppress when the only links present are the ones we just mirrored.
+/// Otherwise pasting e.g. `look at v5 https://youtube.com/...` would nuke the
+/// unrelated YouTube preview. Returns `false` when there are no URLs (nothing
+/// to suppress) or when any URL is off-domain.
+pub fn message_only_links_to(content: &str, domains: &[&str]) -> bool {
+    let mut saw_url = false;
+    // Scan *every* `scheme://` in the whole string, not one per whitespace
+    // token — two URLs joined without a space (`a://x,b://y`) must both be
+    // checked, or an off-domain preview could slip past the gate.
+    let mut rest = content;
+    while let Some(scheme_pos) = rest.find("://") {
+        saw_url = true;
+        let after = &rest[scheme_pos + 3..];
+        // Host is everything up to the first separator. Note we do NOT split
+        // on `@`, so a deceptive `https://vndb.org@evil.com/` yields the host
+        // `vndb.org@evil.com`, which won't match — erring toward *not*
+        // suppressing, which is the safe direction.
+        let host = after
+            .split([
+                '/', '?', '#', ':', ',', ';', ' ', '\t', '\n', '\r', ')', ']', '}', '"', '\'',
+                '<', '>', '|',
+            ])
+            .next()
+            .unwrap_or("");
+        let host = host.strip_prefix("www.").unwrap_or(host).to_ascii_lowercase();
+        let on_domain = domains
+            .iter()
+            .any(|d| host == *d || host.ends_with(&format!(".{d}")));
+        if !on_domain {
+            return false;
+        }
+        rest = after;
+    }
+    saw_url
+}
+
+#[cfg(test)]
+mod tests {
+    use super::message_only_links_to;
+
+    #[test]
+    fn no_url_means_no_suppression() {
+        assert!(!message_only_links_to("just v5 here", &["vndb.org"]));
+        assert!(!message_only_links_to("177013", &["nhentai.net"]));
+    }
+
+    #[test]
+    fn matching_url_suppresses() {
+        assert!(message_only_links_to("https://vndb.org/v5", &["vndb.org"]));
+        assert!(message_only_links_to(
+            "see https://www.nhentai.net/g/177013/",
+            &["nhentai.net"]
+        ));
+    }
+
+    #[test]
+    fn unrelated_url_blocks_suppression() {
+        // The reported bug: a YouTube link next to our resource must NOT be
+        // suppressed (SUPPRESS_EMBEDS would nuke all previews).
+        assert!(!message_only_links_to(
+            "look at v5 https://youtube.com/watch?v=abc",
+            &["vndb.org"]
+        ));
+    }
+
+    #[test]
+    fn all_urls_must_match() {
+        assert!(message_only_links_to(
+            "https://vndb.org/v5 and https://vndb.org/v17",
+            &["vndb.org"]
+        ));
+        assert!(!message_only_links_to(
+            "https://vndb.org/v5 and https://example.com",
+            &["vndb.org"]
+        ));
+    }
+
+    #[test]
+    fn subdomain_matches_but_lookalike_does_not() {
+        assert!(message_only_links_to("https://img.vndb.org/x", &["vndb.org"]));
+        // `notvndb.org` must not be treated as a vndb.org subdomain.
+        assert!(!message_only_links_to("https://notvndb.org/x", &["vndb.org"]));
+    }
+
+    #[test]
+    fn examines_every_url_even_without_whitespace() {
+        // Two URLs glued together by a comma form one whitespace-token; the
+        // off-domain one must still block suppression.
+        assert!(!message_only_links_to(
+            "https://vndb.org/v5,https://youtube.com/x",
+            &["vndb.org"]
+        ));
+    }
+
+    #[test]
+    fn userinfo_lookalike_does_not_match() {
+        // `vndb.org` in the userinfo position must not be treated as the host.
+        assert!(!message_only_links_to("https://vndb.org@evil.com/x", &["vndb.org"]));
+    }
 }

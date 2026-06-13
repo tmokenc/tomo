@@ -6,6 +6,25 @@ use rhai::{Dynamic, Engine, OptimizationLevel};
 
 use crate::ctx::ScriptCtx;
 
+/// Render a chrono `DelayedFormat` without the panic `to_string()` would
+/// raise on a bad pattern, returning `""` instead.
+///
+/// Scripts supply `strftime` patterns verbatim and are hot-reloaded operator
+/// content, so a typo like `%Q` (unknown) or `%#z` (parse-only, no Display
+/// impl) must not abort the process — release builds use `panic = "abort"`.
+/// chrono's `Display` impl *returns* `Err` for these; only `ToString` turns
+/// that into a panic via `.expect(...)`. Going through `write!` lets us catch
+/// the `Err` directly, which covers every bad specifier (not just the
+/// `Item::Error` subset a pre-parse check would find).
+pub(crate) fn safe_strftime(formatted: impl std::fmt::Display) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if write!(out, "{formatted}").is_err() {
+        return String::new();
+    }
+    out
+}
+
 /// Build a fresh Rhai engine wired up with everything scripts in this project
 /// can touch.
 pub fn make_engine() -> Engine {
@@ -49,7 +68,7 @@ pub fn make_engine() -> Engine {
         chrono::Utc
             .timestamp_opt(unix, 0)
             .single()
-            .map(|t| t.format(fmt).to_string())
+            .map(|t| safe_strftime(t.format(fmt)))
             .unwrap_or_default()
     });
     engine.register_fn("format_time_in", |tz: &str, unix: i64, fmt: &str| -> String {
@@ -58,7 +77,7 @@ pub fn make_engine() -> Engine {
         chrono::Utc
             .timestamp_opt(unix, 0)
             .single()
-            .map(|t| t.with_timezone(&tz).format(fmt).to_string())
+            .map(|t| safe_strftime(t.with_timezone(&tz).format(fmt)))
             .unwrap_or_default()
     });
 
@@ -123,4 +142,33 @@ pub fn make_engine() -> Engine {
     // String helpers — `split("|")` and friends already exist in Rhai's stdlib.
 
     engine
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_strftime;
+    use chrono::TimeZone;
+
+    fn fmt(pattern: &str) -> String {
+        let t = chrono::Utc.timestamp_opt(0, 0).single().unwrap();
+        safe_strftime(t.format(pattern))
+    }
+
+    #[test]
+    fn valid_pattern_formats() {
+        assert_eq!(fmt("%Y-%m-%d"), "1970-01-01");
+    }
+
+    #[test]
+    fn unknown_specifier_does_not_panic() {
+        // `%Q` is unknown → chrono's Display returns Err → we yield "".
+        assert_eq!(fmt("%Q"), "");
+    }
+
+    #[test]
+    fn parse_only_specifier_does_not_panic() {
+        // `%#z` parses to a valid-but-unformattable item; `to_string()` would
+        // panic here, but `safe_strftime` must just yield "".
+        assert_eq!(fmt("%#z"), "");
+    }
 }

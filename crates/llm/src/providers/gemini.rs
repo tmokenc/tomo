@@ -89,16 +89,21 @@ impl Provider for GeminiProvider {
             .await
             .map_err(|e| GenerateError::Transport(e.to_string()))?;
 
+        // Gemini signals quota exhaustion either as HTTP 429 or — sometimes —
+        // as HTTP 200 carrying a `RESOURCE_EXHAUSTED` error body. Catch both
+        // *before* the success branch, otherwise the 200 case falls through to
+        // the response parser, decodes as an empty (zero-candidate) success,
+        // and the router never rotates or parks the exhausted model.
+        if status.as_u16() == 429 || is_resource_exhausted(&raw) {
+            let retry = parse_retry_delay(&raw).unwrap_or(DEFAULT_RETRY);
+            warn!(provider = "gemini", model = %model, retry_s = retry.as_secs(), "quota exhausted");
+            return Err(GenerateError::QuotaExceeded {
+                provider: "gemini".into(),
+                model: model.into(),
+                retry_after: retry,
+            });
+        }
         if !status.is_success() {
-            if status.as_u16() == 429 || raw.contains("RESOURCE_EXHAUSTED") {
-                let retry = parse_retry_delay(&raw).unwrap_or(DEFAULT_RETRY);
-                warn!(provider = "gemini", model = %model, retry_s = retry.as_secs(), "quota exhausted");
-                return Err(GenerateError::QuotaExceeded {
-                    provider: "gemini".into(),
-                    model: model.into(),
-                    retry_after: retry,
-                });
-            }
             warn!(provider = "gemini", model = %model, %status, body = %raw, "api error");
             return Err(GenerateError::Api {
                 provider: "gemini".into(),
@@ -147,6 +152,21 @@ fn role_to_str(role: Role) -> &'static str {
     }
 }
 
+/// Whether the response body carries Google's `RESOURCE_EXHAUSTED` error
+/// *status*. Checks the structured `error.status` field rather than a raw
+/// substring so a model that merely *mentions* "RESOURCE_EXHAUSTED" in its
+/// generated text isn't mistaken for a quota error.
+fn is_resource_exhausted(body: &str) -> bool {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/status")
+                .and_then(Value::as_str)
+                .map(|s| s == "RESOURCE_EXHAUSTED")
+        })
+        .unwrap_or(false)
+}
+
 /// Pull `retryDelay` (e.g. `"47s"`, `"1.5s"`, `"1m30s"`) from Google's 429
 /// body when it carries a `RetryInfo` detail.
 fn parse_retry_delay(body: &str) -> Option<Duration> {
@@ -175,11 +195,16 @@ pub(crate) fn parse_duration_str(s: &str) -> Option<Duration> {
             "" => 0,
             n => n.parse().ok()?,
         };
-        return Some(Duration::from_secs(mins * 60 + secs));
+        // Checked arithmetic: a hostile/huge `retryDelay` must not overflow.
+        let total = mins.checked_mul(60)?.checked_add(secs)?;
+        return Some(Duration::from_secs(total));
     }
     if let Some(num) = s.strip_suffix('s') {
         let secs: f64 = num.parse().ok()?;
-        return Some(Duration::from_secs_f64(secs));
+        // `try_from_secs_f64` returns `Err` (not a panic, unlike
+        // `from_secs_f64`) for negative / NaN / infinite / overflowing values
+        // — the `retryDelay` is attacker-influenced upstream input.
+        return Duration::try_from_secs_f64(secs).ok();
     }
     None
 }
@@ -221,8 +246,34 @@ struct UsageMetadata {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_duration_str, parse_retry_delay};
+    use super::{is_resource_exhausted, parse_duration_str, parse_retry_delay};
     use std::time::Duration;
+
+    #[test]
+    fn detects_structured_resource_exhausted() {
+        // 200-with-error shape Gemini sometimes returns.
+        assert!(is_resource_exhausted(
+            r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}"#
+        ));
+        // A normal generation that merely *mentions* the term must NOT trip it.
+        assert!(!is_resource_exhausted(
+            r#"{"candidates":[{"content":{"parts":[{"text":"RESOURCE_EXHAUSTED means quota ran out"}]}}]}"#
+        ));
+        assert!(!is_resource_exhausted("not json"));
+    }
+
+    #[test]
+    fn duration_parser_rejects_hostile_input_without_panicking() {
+        // `from_secs_f64` would panic on these; `try_from_secs_f64` rejects.
+        assert_eq!(parse_duration_str("-5s"), None);
+        assert_eq!(parse_duration_str("NaNs"), None);
+        assert_eq!(parse_duration_str("infs"), None);
+        // Minute overflow must be rejected, not overflow-panic:
+        // too big for u64 at all (parse fails)…
+        assert_eq!(parse_duration_str("99999999999999999999999m"), None);
+        // …and within u64 but `* 60` overflows (checked_mul → None).
+        assert_eq!(parse_duration_str("9999999999999999999m"), None);
+    }
 
     #[test]
     fn parses_simple_seconds() {

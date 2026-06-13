@@ -4,11 +4,13 @@ use std::sync::Arc;
 use twilight_model::application::command::{Command as DiscordCommand, CommandType};
 use twilight_model::id::Id;
 use twilight_model::id::marker::GuildMarker;
-use twilight_util::builder::command::CommandBuilder;
+use twilight_util::builder::command::{
+    BooleanBuilder, ChannelBuilder, CommandBuilder, IntegerBuilder, StringBuilder, UserBuilder,
+};
 
 use tomo_core::error::{Error, Result};
 
-use crate::command::DynCommand;
+use crate::command::{DynCommand, OptionKind};
 use crate::state::Bot;
 
 /// Read-only snapshot of every command currently dispatchable.
@@ -68,6 +70,32 @@ impl CommandRegistry {
                 );
                 if let Some(req) = meta.required_permissions {
                     builder = builder.default_member_permissions(req);
+                }
+                // Attach the declared slash options so the parameters actually
+                // show up in Discord's UI (and arrive in the interaction).
+                // Discord requires all required options to precede optional
+                // ones, so sort required-first before adding.
+                let mut opts = meta.options.clone();
+                opts.sort_by_key(|o| !o.required);
+                for opt in &opts {
+                    let (name, desc, req) = (opt.name.clone(), opt.description.clone(), opt.required);
+                    builder = match opt.kind {
+                        OptionKind::String => {
+                            builder.option(StringBuilder::new(name, desc).required(req))
+                        }
+                        OptionKind::Integer => {
+                            builder.option(IntegerBuilder::new(name, desc).required(req))
+                        }
+                        OptionKind::Boolean => {
+                            builder.option(BooleanBuilder::new(name, desc).required(req))
+                        }
+                        OptionKind::User => {
+                            builder.option(UserBuilder::new(name, desc).required(req))
+                        }
+                        OptionKind::Channel => {
+                            builder.option(ChannelBuilder::new(name, desc).required(req))
+                        }
+                    };
                 }
                 builder.build()
             })

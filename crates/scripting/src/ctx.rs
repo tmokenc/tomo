@@ -1,9 +1,25 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use flume::{Receiver, Sender};
 use rhai::{CustomType, TypeBuilder};
 
 use tomo_embed::Embed2;
 
 use crate::embed::ScriptEmbed;
+
+/// Upper bound on the *Discord-API-producing* actions a single script
+/// invocation may enqueue. Each becomes a real API call, so without a cap a
+/// runaway script (`for i in 0..50000 { ctx.reply("x") }`) — which fits well
+/// inside the engine's operation budget — would flood the API for hours.
+/// Generous enough for any legitimate script.
+const MAX_API_ACTIONS: usize = 25;
+
+/// Separate, looser cap on `Log` actions. These are *not* API calls — the
+/// host renders them as `debug!` tracing lines — so they get their own budget
+/// and never crowd a script's real reply out of the API budget. The cap still
+/// bounds memory against a script that logs in a tight loop.
+const MAX_LOG_ACTIONS: usize = 200;
 
 /// Side-effects a script can request. The host drains these after running the
 /// script and turns them into Discord API calls.
@@ -65,12 +81,25 @@ pub struct ScriptCtx {
     pub now_unix: i64,
 
     actions: Sender<ScriptAction>,
+    /// Per-invocation budgets, shared across the cheap `Clone`s Rhai makes.
+    budget: Arc<ActionBudget>,
+}
+
+/// Per-invocation counters that cap how many actions a script can enqueue,
+/// keeping API calls and log lines on independent budgets.
+#[derive(Default)]
+struct ActionBudget {
+    api: AtomicUsize,
+    log: AtomicUsize,
 }
 
 impl ScriptCtx {
     /// Build a context and its receiving half. The host keeps the receiver to
     /// drain `ScriptAction`s once the script returns.
     pub fn new(init: ScriptInit) -> (Self, Receiver<ScriptAction>) {
+        // Unbounded channel; the per-invocation cap is enforced in `push` via
+        // `budget` so API actions and log lines have independent limits (a
+        // bounded channel would let either kind crowd out the other).
         let (tx, rx) = flume::unbounded();
         let ctx = Self {
             channel_id: init.channel_id as i64,
@@ -85,14 +114,24 @@ impl ScriptCtx {
             bot_started_at_unix: init.bot_started_at_unix,
             now_unix: init.now_unix,
             actions: tx,
+            budget: Arc::new(ActionBudget::default()),
         };
         (ctx, rx)
     }
 
     fn push(&self, action: ScriptAction) {
-        // Unbounded send only fails on a closed channel; that's only possible
-        // if the host dropped the receiver, in which case the script's
-        // requests are intentionally being discarded.
+        // Enforce the per-invocation cap on the budget matching this action's
+        // kind. `Log` is host-side tracing, not an API call, so it can't
+        // exhaust the API budget and drop a script's real reply.
+        let (counter, limit) = match &action {
+            ScriptAction::Log(_) => (&self.budget.log, MAX_LOG_ACTIONS),
+            _ => (&self.budget.api, MAX_API_ACTIONS),
+        };
+        if counter.fetch_add(1, Ordering::Relaxed) >= limit {
+            return; // budget exhausted — drop silently
+        }
+        // Send only fails if the receiver was dropped (host discarded the
+        // requests); intentional no-op, never blocks the engine.
         let _ = self.actions.send(action);
     }
 }

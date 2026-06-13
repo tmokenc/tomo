@@ -14,7 +14,7 @@ use tracing::warn;
 use twilight_model::http::attachment::Attachment as HttpAttachment;
 
 use tomo_core::error::{Error, Result};
-use tomo_embed::{Embed2, Embedable};
+use tomo_embed::Embed2;
 
 use crate::command::{Command, CommandContext, CommandMeta};
 use crate::util::{fetch_image_from_context, truncate};
@@ -83,14 +83,10 @@ async fn generate(ctx: &CommandContext, text: String) -> Result<()> {
     }
 
     let attachment = HttpAttachment::from_bytes(QR_FILENAME.into(), png, 0);
-    let built = embed.build_embed();
-    ctx.bot
-        .http
-        .create_message(ctx.channel_id())
-        .attachments(std::slice::from_ref(&attachment))
-        .embeds(std::slice::from_ref(&built))
-        .await
-        .map_err(|e| Error::config(format!("qr send: {e}")))?;
+    // Routes to an interaction response/followup for slash (acknowledging it)
+    // or a normal reply for prefix.
+    ctx.reply_embed_with_attachments(&embed, std::slice::from_ref(&attachment))
+        .await?;
     Ok(())
 }
 

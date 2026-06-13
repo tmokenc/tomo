@@ -210,12 +210,19 @@ impl Trigger for RegexResponderTrigger {
 /// capped at [`DiscordConfig::gallery_lookup_wait_secs`] seconds; on
 /// timeout we also remove our reaction. Returns immediately — runs the
 /// whole flow on a spawned task.
+///
+/// `suppress_source_embeds` controls whether, *after the user clicks and
+/// our embed is sent*, the user's original message has its Discord-side
+/// link preview suppressed (via [`crate::util::suppress_embeds`]). The
+/// triggers pass `true` only when every URL in the source message points at
+/// the matched site — see [`crate::util::message_only_links_to`].
 fn spawn_react_then_show(
     bot: Bot,
     channel_id: twilight_model::id::Id<twilight_model::id::marker::ChannelMarker>,
     message_id: twilight_model::id::Id<twilight_model::id::marker::MessageMarker>,
     emoji: &'static str,
     embed: twilight_model::channel::message::Embed,
+    suppress_source_embeds: bool,
 ) {
     tokio::spawn(async move {
         let req = RequestReactionType::Unicode { name: emoji };
@@ -243,6 +250,8 @@ fn spawn_react_then_show(
                 .await
             {
                 warn!(error = %e, emoji, "gallery-lookup: failed to send embed");
+            } else if suppress_source_embeds {
+                crate::util::suppress_embeds(&bot, channel_id, message_id).await;
             }
         }
 
@@ -298,12 +307,14 @@ impl Trigger for NhentaiLookupTrigger {
             Err(_) => return Ok(()),
         };
         let embed = nhentai_gallery_embed(&gallery, Some(&ctx.message.author)).build();
+        let has_url = crate::util::message_only_links_to(&ctx.message.content, &["nhentai.net"]);
         spawn_react_then_show(
             Arc::clone(&ctx.bot),
             ctx.message.channel_id,
             ctx.message.id,
             SPIDER,
             embed,
+            has_url,
         );
         Ok(())
     }
@@ -350,12 +361,15 @@ impl Trigger for EhentaiLookupTrigger {
         let Some(gallery) = galleries.into_iter().next() else { return Ok(()) };
 
         let embed = ehentai_gallery_embed(&gallery, Some(&ctx.message.author)).build();
+        let has_url =
+            crate::util::message_only_links_to(&ctx.message.content, &["e-hentai.org", "exhentai.org"]);
         spawn_react_then_show(
             Arc::clone(&ctx.bot),
             ctx.message.channel_id,
             ctx.message.id,
             PANDA,
             embed,
+            has_url,
         );
         Ok(())
     }
@@ -398,12 +412,14 @@ impl Trigger for VndbLookupTrigger {
             .map(|c| c.nsfw.unwrap_or(false))
             .unwrap_or(false);
         let embed = vndb_gallery_embed(&vn, Some(&ctx.message.author), nsfw).build();
+        let has_url = crate::util::message_only_links_to(&ctx.message.content, &["vndb.org"]);
         spawn_react_then_show(
             Arc::clone(&ctx.bot),
             ctx.message.channel_id,
             ctx.message.id,
             BOOK,
             embed,
+            has_url,
         );
         Ok(())
     }

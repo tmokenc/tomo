@@ -37,6 +37,11 @@ impl Command for KanjiCommand {
                 .await;
         }
 
+        // Slash: acknowledge before the Mazii round-trip so a slow lookup
+        // can't blow Discord's 3s window; the embed then goes out as a followup.
+        if ctx.is_slash() {
+            let _ = ctx.defer().await;
+        }
         let _ = ctx.bot.http.create_typing_trigger(ctx.channel_id()).await;
         let search = match ctx.bot.requester.kanji_search(query).await {
             Ok(s) => s,
@@ -72,7 +77,7 @@ impl Command for KanjiCommand {
                 search.results.len(),
                 if search.results.len() == 1 { "" } else { "es" },
             ))
-            .footer(format!("Source: kanjiapi.dev · {} entries", search.results.len()))
+            .footer(format!("Source: mazii.net · {} entries", search.results.len()))
             .timestamp_now();
 
         if let Some(user) = ctx.author() {
@@ -83,7 +88,7 @@ impl Command for KanjiCommand {
             let header = format!(
                 "{} — {}{} | {}{}",
                 kanji.kanji,
-                kanji.level.map(|l| format!("(N{l}) ")).unwrap_or_default(),
+                kanji.jlpt_level().map(|l| format!("({l}) ")).unwrap_or_default(),
                 kanji.mean,
                 kanji.pretty_on(),
                 kanji.pretty_kun().map(|k| format!(" | {k}")).unwrap_or_default(),

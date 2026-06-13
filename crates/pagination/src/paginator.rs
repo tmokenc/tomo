@@ -9,7 +9,7 @@ use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle
 use twilight_model::channel::message::{Component, Embed, EmojiReactionType, MessageFlags};
 use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
 use twilight_model::id::Id;
-use twilight_model::id::marker::{ChannelMarker, UserMarker};
+use twilight_model::id::marker::{ChannelMarker, MessageMarker, UserMarker};
 use twilight_standby::Standby;
 use twilight_util::builder::InteractionResponseDataBuilder;
 
@@ -54,34 +54,72 @@ impl<S: PageSource + 'static + ?Sized> Paginator<S> {
         self
     }
 
-    /// Send the first page to `channel_id` and run the paginator loop until
-    /// the user closes it or `idle_timeout` elapses.
+    /// Send the first page as a normal channel message and run the paginator
+    /// loop. Used by prefix invocations.
     pub async fn run(
         self,
         channel_id: Id<ChannelMarker>,
         invoker: Id<UserMarker>,
     ) -> Result<()> {
-        let total = self.source.total_pages();
-        if total == Some(0) {
-            return Err(Error::config("paginator: no pages"));
-        }
-
-        let mut current: usize = 0;
-        let initial_embed = self.source.page(current).await?;
-        let initial_components = self.build_components(current);
-
+        let (current, embed, components) = self.first_page().await?;
         let sent = self
             .http
             .create_message(channel_id)
-            .embeds(std::slice::from_ref(&initial_embed))
-            .components(&initial_components)
+            .embeds(std::slice::from_ref(&embed))
+            .components(&components)
             .await
             .map_err(|e| Error::config(format!("paginator send: {e}")))?
             .model()
             .await
             .map_err(|e| Error::config(format!("paginator decode: {e}")))?;
 
-        let message_id = sent.id;
+        self.run_loop(channel_id, sent.id, invoker, current).await
+    }
+
+    /// Post the first page as a followup to an already-deferred slash
+    /// interaction, then run the paginator loop. The followup *is* the
+    /// interaction's response, so the slash command is properly acknowledged.
+    /// The caller must have `defer()`-ed the interaction first.
+    pub async fn run_interaction(
+        self,
+        interaction: &Interaction,
+        invoker: Id<UserMarker>,
+    ) -> Result<()> {
+        let (current, embed, components) = self.first_page().await?;
+        let client = self.http.interaction(interaction.application_id);
+        let sent = client
+            .create_followup(&interaction.token)
+            .embeds(std::slice::from_ref(&embed))
+            .components(&components)
+            .await
+            .map_err(|e| Error::config(format!("paginator followup: {e}")))?
+            .model()
+            .await
+            .map_err(|e| Error::config(format!("paginator decode: {e}")))?;
+
+        self.run_loop(sent.channel_id, sent.id, invoker, current).await
+    }
+
+    /// Compute page 0's embed and button row, erroring if the source is empty.
+    async fn first_page(&self) -> Result<(usize, Embed, Vec<Component>)> {
+        if self.source.total_pages() == Some(0) {
+            return Err(Error::config("paginator: no pages"));
+        }
+        let embed = self.source.page(0).await?;
+        let components = self.build_components(0);
+        Ok((0, embed, components))
+    }
+
+    /// The shared button-handling loop, driving an already-posted message
+    /// `message_id` in `channel_id` until close or idle timeout.
+    async fn run_loop(
+        &self,
+        channel_id: Id<ChannelMarker>,
+        message_id: Id<MessageMarker>,
+        invoker: Id<UserMarker>,
+        mut current: usize,
+    ) -> Result<()> {
+        let total = self.source.total_pages();
 
         loop {
             let fut = self.standby.wait_for_component(message_id, |_: &Interaction| true);

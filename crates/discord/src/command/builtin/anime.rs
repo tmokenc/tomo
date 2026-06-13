@@ -67,6 +67,11 @@ async fn run(ctx: CommandContext, media_type: AniListType) -> Result<()> {
         return reply_warn(&ctx, media_type, "Give me a title to search for.").await;
     }
 
+    // Slash: acknowledge before the AniList round-trip so a slow search can't
+    // blow Discord's 3s window. Later responses go out as followups.
+    if ctx.is_slash() {
+        let _ = ctx.defer().await;
+    }
     let _ = ctx.bot.http.create_typing_trigger(ctx.channel_id()).await;
 
     // Brief search — just IDs + titles. The paginator hydrates each entry
@@ -130,9 +135,14 @@ async fn send_paginated(
     ));
     let invoker_id = ctx.author_id();
     let channel_id = ctx.channel_id();
-    Paginator::new(Arc::clone(&ctx.bot.http), Arc::clone(&ctx.bot.standby), source)
-        .run(channel_id, invoker_id)
-        .await
+    let paginator = Paginator::new(Arc::clone(&ctx.bot.http), Arc::clone(&ctx.bot.standby), source);
+    // Slash already deferred in `run`; post pages as the interaction's
+    // followup. Prefix posts a normal channel message.
+    if let Some(interaction) = ctx.interaction() {
+        paginator.run_interaction(interaction, invoker_id).await
+    } else {
+        paginator.run(channel_id, invoker_id).await
+    }
 }
 
 /// Page source that holds the search briefs and fetches the full media body

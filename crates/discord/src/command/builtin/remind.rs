@@ -222,12 +222,25 @@ fn consume_duration_prefix(raw: &str) -> Option<(Duration, String)> {
     for token in raw.split_whitespace() {
         match parse_duration(token) {
             Ok(d) => {
-                total += d;
+                // Reject absurd inputs (e.g. `999999999years 999999999years`)
+                // rather than panicking in `Duration`'s `Add`. The later
+                // `MAX_DURATION` clamp only runs on the *summed* value, so it
+                // can't protect this accumulation step.
+                total = total.checked_add(d)?;
                 let after = &raw[consumed..];
                 let local_pos = after.find(token)? + token.len();
                 consumed += local_pos;
-                while raw[consumed..].starts_with(char::is_whitespace) {
-                    consumed += 1;
+                // Advance past trailing whitespace by *character* width.
+                // `split_whitespace` treats multi-byte Unicode whitespace
+                // (U+3000 ideographic space, U+00A0 NBSP, …) as a separator,
+                // so stepping one byte at a time would land mid-character and
+                // panic with "byte index is not a char boundary".
+                while let Some(c) = raw[consumed..].chars().next() {
+                    if c.is_whitespace() {
+                        consumed += c.len_utf8();
+                    } else {
+                        break;
+                    }
                 }
                 found_any = true;
             }
@@ -238,4 +251,37 @@ fn consume_duration_prefix(raw: &str) -> Option<(Duration, String)> {
         return None;
     }
     Some((total, raw[consumed..].to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_prefix() {
+        let (d, rest) = consume_duration_prefix("1h 30m do laundry").unwrap();
+        assert_eq!(d, Duration::from_secs(90 * 60));
+        assert_eq!(rest, "do laundry");
+    }
+
+    #[test]
+    fn rejects_leading_non_duration() {
+        assert!(consume_duration_prefix("hello world").is_none());
+    }
+
+    #[test]
+    fn handles_multibyte_whitespace_after_token() {
+        // U+3000 ideographic space — what a Japanese IME inserts by default.
+        // The byte-at-a-time skip used to slice mid-character and panic.
+        let (d, rest) = consume_duration_prefix("1h\u{3000}wash dishes").unwrap();
+        assert_eq!(d, Duration::from_secs(60 * 60));
+        assert_eq!(rest, "wash dishes");
+    }
+
+    #[test]
+    fn does_not_panic_on_duration_overflow() {
+        // Each token parses fine in isolation; the sum overflows `Duration`.
+        // Must return None instead of panicking in `Duration::add`.
+        assert!(consume_duration_prefix("500000000000years 500000000000years pay rent").is_none());
+    }
 }

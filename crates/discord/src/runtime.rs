@@ -15,7 +15,6 @@ use twilight_http::Client;
 use twilight_model::application::interaction::{Interaction, InteractionData, InteractionType};
 use twilight_model::channel::Message;
 use twilight_model::gateway::payload::incoming::{InteractionCreate, MessageCreate};
-use twilight_model::id::Id;
 use twilight_standby::Standby;
 
 use tomo_core::{Config, Result as CoreResult, Service};
@@ -121,12 +120,24 @@ impl DiscordService {
 
         if bot.config.discord.enable_slash {
             let registry = bot.commands.load_full();
-            if let Err(e) =
-                publish_slash(&bot, &registry, bot.config.discord.dev_guild.filter(|_| !bot.config.discord.register_global)).await
-            {
-                warn!(error = %e, "failed publishing slash commands");
+            let register_global = bot.config.discord.register_global;
+            let dev_guild = bot.config.discord.dev_guild;
+            if !register_global && dev_guild.is_none() {
+                // Guild-scoped registration was requested but no dev guild is
+                // set. Publishing with `None` would register *globally* — the
+                // exact thing the operator disabled — so skip instead.
+                warn!(
+                    "TOMO_REGISTER_GLOBAL=false but TOMO_DEV_GUILD is unset — \
+                     skipping slash registration to avoid an unintended global publish"
+                );
             } else {
-                info!("slash commands published");
+                // Global publish uses `None`; guild-scoped uses the dev guild.
+                let scope = if register_global { None } else { dev_guild };
+                if let Err(e) = publish_slash(&bot, &registry, scope).await {
+                    warn!(error = %e, "failed publishing slash commands");
+                } else {
+                    info!(global = scope.is_none(), "slash commands published");
+                }
             }
         }
 
@@ -383,6 +394,12 @@ async fn dispatch_application_command(bot: Bot, interaction: Interaction) {
     let name = cmd_data.name.clone();
     let Some(cmd) = bot.commands.load().get(&name).cloned() else {
         warn!(name, "unknown slash command");
+        ack_ephemeral(
+            &bot,
+            &interaction,
+            "Unknown command — it may have just been removed or renamed.",
+        )
+        .await;
         return;
     };
 
@@ -397,6 +414,31 @@ async fn dispatch_application_command(bot: Bot, interaction: Interaction) {
         },
     )
     .await;
+}
+
+/// Send a private (ephemeral) acknowledgement for a slash interaction we're
+/// about to drop (unknown command, etc.) so the user doesn't see Discord's
+/// "The application did not respond" error. Best-effort: logs on failure.
+async fn ack_ephemeral(bot: &Bot, interaction: &Interaction, content: &str) {
+    use twilight_model::channel::message::MessageFlags;
+    use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
+    use twilight_util::builder::InteractionResponseDataBuilder;
+
+    let data = InteractionResponseDataBuilder::new()
+        .flags(MessageFlags::EPHEMERAL)
+        .content(content.to_string())
+        .build();
+    let response = InteractionResponse {
+        kind: InteractionResponseType::ChannelMessageWithSource,
+        data: Some(data),
+    };
+    let client = bot.http.interaction(interaction.application_id);
+    if let Err(e) = client
+        .create_response(interaction.id, &interaction.token, &response)
+        .await
+    {
+        warn!(error = %e, "failed to acknowledge interaction");
+    }
 }
 
 /// Modal submits come back with their own `custom_id`. We route by prefix
@@ -446,34 +488,34 @@ fn flatten_options(
 async fn run_command(bot: Bot, cmd: DynCommand, source: InvocationSource) {
     let meta = cmd.meta().clone();
 
-    let author = match &source {
-        InvocationSource::Prefix { msg, .. } => msg.author.id,
-        InvocationSource::Slash { interaction, .. } => {
-            interaction.author_id().unwrap_or(Id::new(1))
-        }
-    };
-    let guild_id = match &source {
-        InvocationSource::Prefix { msg, .. } => msg.guild_id,
-        InvocationSource::Slash { interaction, .. } => interaction.guild_id,
-    };
+    // Build the context up front so permission denials can acknowledge the
+    // interaction (a slash invocation that returns without responding shows
+    // the user Discord's red "The application did not respond").
+    let ctx = CommandContext::new(Arc::clone(&bot), source);
+    let author = ctx.author_id();
+    let guild_id = ctx.guild_id();
 
     // Permission gates. Bot owners bypass everything (owner_only, guild_only,
     // required_permissions) on any server — useful for emergency admin and
     // for the bot author testing in their own dev guild without role
-    // wrangling.
+    // wrangling. On denial we send the slash invoker a private (ephemeral)
+    // note; prefix denials stay silent, matching long-standing behaviour.
     let is_owner = bot.is_owner(author);
     if !is_owner {
         if meta.owner_only {
             warn!(name = %meta.name, user = %author, "non-owner attempted owner command");
+            let _ = ctx.deny_ephemeral("This command is restricted to the bot owner.").await;
             return;
         }
         if meta.guild_only && guild_id.is_none() {
             warn!(name = %meta.name, "guild-only command used in DM");
+            let _ = ctx.deny_ephemeral("This command can only be used in a server.").await;
             return;
         }
         if let Some(required) = meta.required_permissions {
             let Some(gid) = guild_id else {
                 warn!(name = %meta.name, "permission-gated command used in DM");
+                let _ = ctx.deny_ephemeral("This command can only be used in a server.").await;
                 return;
             };
             match crate::permissions::resolve(&bot, author, gid).await {
@@ -486,6 +528,9 @@ async fn run_command(bot: Bot, cmd: DynCommand, source: InvocationSource) {
                         required = ?required,
                         "user lacks required permissions"
                     );
+                    let _ = ctx
+                        .deny_ephemeral("You don't have permission to use this command here.")
+                        .await;
                     return;
                 }
                 Err(e) => {
@@ -496,13 +541,15 @@ async fn run_command(bot: Bot, cmd: DynCommand, source: InvocationSource) {
                         error = %e,
                         "permission calc failed even after hydrate — denying"
                     );
+                    let _ = ctx
+                        .deny_ephemeral("I couldn't verify your permissions — please try again.")
+                        .await;
                     return;
                 }
             }
         }
     }
 
-    let ctx = CommandContext::new(Arc::clone(&bot), source);
     let kind = if ctx.is_slash() { CommandKind::Slash } else { CommandKind::Prefix };
     let start = Instant::now();
     let result = cmd.execute(ctx).await;
@@ -599,12 +646,16 @@ fn spawn_registry_refresher(bot: Bot) {
     // into the watcher notify channel directly; polling is simpler and the
     // cost is negligible.
     tokio::spawn(async move {
-        let mut last_ptr = Arc::as_ptr(&bot.scripts.registry()) as usize;
+        // Retain the Arc, not a raw `as_ptr() as usize`. Holding the previous
+        // registry pins its allocation, so a fresh registry can never reuse
+        // that address — otherwise two reloads inside one 500ms window (an
+        // ABA) could leave `now == last_ptr` and silently drop a reload.
+        let mut last = bot.scripts.registry();
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let now = Arc::as_ptr(&bot.scripts.registry()) as usize;
-            if now != last_ptr {
-                last_ptr = now;
+            let now = bot.scripts.registry();
+            if !Arc::ptr_eq(&last, &now) {
+                last = now;
                 refresh_command_registry(&bot);
                 refresh_trigger_registry(&bot);
                 debug!("registries refreshed from hot-reload");

@@ -21,17 +21,33 @@ pub struct KanjiSearch {
     pub results: Vec<KanjiEntry>,
 }
 
+/// One kanji hit. Field types mirror what Mazii's `javi` dictionary actually
+/// returns (verified live): `on` is `null` for kokuji, `level` is a JSON
+/// array of JLPT tags like `["N5"]` (or `null`), and `stoke_count` is `null`
+/// on this endpoint. Everything optional carries `#[serde(default)]` so a
+/// missing *or* explicitly-null field decodes to `None` instead of aborting
+/// the whole `Vec<KanjiEntry>` decode.
 #[derive(Debug, Clone, Deserialize)]
 pub struct KanjiEntry {
     pub kanji: char,
+    #[serde(default)]
     pub mean: String,
-    pub on: String,
+    #[serde(default)]
+    pub on: Option<String>,
+    #[serde(default)]
     pub kun: Option<String>,
+    #[serde(default)]
     pub detail: Option<String>,
+    #[serde(default)]
     pub comp: Option<String>,
-    pub level: Option<char>,
-    pub stoke_count: Option<char>,
+    /// JLPT level tags, e.g. `["N5"]`. Each entry already includes the `N`.
+    #[serde(default)]
+    pub level: Option<Vec<String>>,
+    #[serde(default)]
+    pub stoke_count: Option<u32>,
+    #[serde(default)]
     pub example_on: Option<HashMap<String, Vec<KanjiExample>>>,
+    #[serde(default)]
     pub example_kun: Option<HashMap<String, Vec<KanjiExample>>>,
 }
 
@@ -57,7 +73,17 @@ struct KanjiBody<'a> {
 impl KanjiEntry {
     /// `on` reading split by space then re-joined with `、` for prettier output.
     pub fn pretty_on(&self) -> String {
-        self.on.split_whitespace().collect::<Vec<_>>().join("、")
+        self.on
+            .as_deref()
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("、")
+    }
+
+    /// First JLPT level tag (e.g. `"N5"`), if Mazii reported one.
+    pub fn jlpt_level(&self) -> Option<&str> {
+        self.level.as_ref()?.first().map(String::as_str)
     }
 
     pub fn pretty_kun(&self) -> Option<String> {
@@ -100,5 +126,34 @@ impl Requester {
             q.chars().position(|c| c == entry.kanji).unwrap_or(usize::MAX)
         });
         Ok(search)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real shape returned by `https://mazii.net/api/search` (dict=javi):
+    /// `level` is a string array, `on`/`level`/`stoke_count` can be null.
+    /// This used to fail to decode entirely, killing the `kanji` command.
+    #[test]
+    fn decodes_real_mazii_shape() {
+        let raw = r#"{
+            "status": 200,
+            "results": [
+                {"kanji":"水","mean":"THỦY","on":"スイ","kun":"みず みず-","level":["N5"],"stoke_count":null},
+                {"kanji":"込","mean":"","on":null,"kun":"こ.む","level":["N3"],"stoke_count":null},
+                {"kanji":"薔","mean":"SẮC","on":"バ ショウ","kun":"みずたで","level":null,"stoke_count":null}
+            ]
+        }"#;
+        let parsed: KanjiSearch = serde_json::from_str(raw).expect("must decode");
+        assert_eq!(parsed.results.len(), 3);
+        assert_eq!(parsed.results[0].jlpt_level(), Some("N5"));
+        assert_eq!(parsed.results[0].pretty_on(), "スイ");
+        // kokuji with a null `on` — must not panic, just yield empty.
+        assert_eq!(parsed.results[1].pretty_on(), "");
+        assert_eq!(parsed.results[1].jlpt_level(), Some("N3"));
+        // null `level` → no tag.
+        assert_eq!(parsed.results[2].jlpt_level(), None);
     }
 }

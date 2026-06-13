@@ -15,9 +15,9 @@ use tomo_embed::{Embed2, Embedable};
 use tomo_requester::vndb::parse_vn_id;
 use tomo_requester::{VndbBrief, VndbVn};
 
-use crate::command::{Command, CommandContext, CommandMeta};
+use crate::command::{Command, CommandContext, CommandMeta, InvocationSource};
 use crate::state::Bot;
-use crate::util::truncate;
+use crate::util::{message_only_links_to, suppress_embeds, truncate};
 use crate::vndb_view::gallery_embed;
 
 const VNDB_ICON: &str = "https://s.vndb.org/s/angel.png";
@@ -49,6 +49,12 @@ impl Command for VndbCommand {
             return reply_warn(&ctx, "Give me a title, a `vNNN` id, or a vndb.org URL.").await;
         }
 
+        // Slash: acknowledge before any upstream call so a slow VNDB
+        // round-trip can't blow Discord's 3s window. Every later response
+        // (single embed, pagination, errors) then goes out as a followup.
+        if ctx.is_slash() {
+            let _ = ctx.defer().await;
+        }
         let _ = ctx.bot.http.create_typing_trigger(ctx.channel_id()).await;
 
         // Direct-lookup shortcut: if the whole query *is* a VN id or URL, fetch
@@ -83,11 +89,26 @@ async fn run_direct(ctx: &CommandContext, id: &str) -> Result<()> {
     }
 }
 
-/// Send the single-result embed (no pagination).
+/// Send the single-result embed (no pagination). When the user invoked
+/// us by pasting a vndb.org URL in a prefix command, suppress Discord's
+/// auto-embed on their message so the channel doesn't show both our
+/// rich embed and Discord's plain link preview.
 async fn send_single(ctx: &CommandContext, vn: &VndbVn) -> Result<()> {
     let nsfw = is_nsfw_channel(ctx);
     let embed = gallery_embed(vn, ctx.author(), nsfw);
-    ctx.reply_embed(&embed).await
+    ctx.reply_embed(&embed).await?;
+    suppress_source_if_url(ctx).await;
+    Ok(())
+}
+
+/// Strip the source message's auto-embed when the invocation was a
+/// prefix command and the original content contained a URL.
+async fn suppress_source_if_url(ctx: &CommandContext) {
+    if let InvocationSource::Prefix { msg, .. } = &ctx.source {
+        if message_only_links_to(&msg.content, &["vndb.org"]) {
+            suppress_embeds(&ctx.bot, msg.channel_id, msg.id).await;
+        }
+    }
 }
 
 /// Multi-match path: hand the briefs to a lazy paginator that fetches each
@@ -106,9 +127,14 @@ async fn send_paginated(ctx: CommandContext, briefs: Vec<VndbBrief>) -> Result<(
     ));
     let invoker_id = ctx.author_id();
     let channel_id = ctx.channel_id();
-    Paginator::new(Arc::clone(&ctx.bot.http), Arc::clone(&ctx.bot.standby), source)
-        .run(channel_id, invoker_id)
-        .await
+    let paginator = Paginator::new(Arc::clone(&ctx.bot.http), Arc::clone(&ctx.bot.standby), source);
+    // Slash already deferred in `execute`; post pages as the interaction's
+    // followup. Prefix posts a normal channel message.
+    if let Some(interaction) = ctx.interaction() {
+        paginator.run_interaction(interaction, invoker_id).await
+    } else {
+        paginator.run(channel_id, invoker_id).await
+    }
 }
 
 /// Page source that holds the search briefs and fetches the full VN per

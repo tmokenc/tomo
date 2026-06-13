@@ -6,13 +6,13 @@ use std::sync::LazyLock;
 
 use async_trait::async_trait;
 
-use tomo_core::error::{Error, Result};
+use tomo_core::error::Result;
 use tomo_embed::Embed2;
 use tomo_requester::ehentai::parse_ids;
 
 use crate::command::{Command, CommandContext, CommandMeta, InvocationSource};
 use crate::ehentai_view::gallery_embed;
-use crate::util::{cache_pick_from_human, truncate};
+use crate::util::{cache_pick_from_human, message_only_links_to, suppress_embeds, truncate};
 
 /// Site favicon used to brand the embed footer when we render the
 /// multi-gallery list.
@@ -55,6 +55,11 @@ impl Command for EhentaiCommand {
             .await;
         }
 
+        // Slash: acknowledge immediately — the gdata round-trip can exceed
+        // Discord's 3s initial-response window. Prefix: defer is a no-op.
+        if ctx.is_slash() {
+            let _ = ctx.defer().await;
+        }
         let _ = ctx.bot.http.create_typing_trigger(ctx.channel_id()).await;
         let galleries = match ctx.bot.requester.ehentai_gmetadata(&ids).await {
             Ok(g) => g,
@@ -76,13 +81,8 @@ impl Command for EhentaiCommand {
 
         // For >1 result, render a compact list. For one, render rich details.
         if galleries.len() == 1 {
-            let embed = gallery_embed(&galleries[0], ctx.author()).build();
-            ctx.bot
-                .http
-                .create_message(ctx.channel_id())
-                .embeds(std::slice::from_ref(&embed))
-                .await
-                .map_err(|e| Error::config(format!("ehentai send: {e}")))?;
+            ctx.reply_embed(&gallery_embed(&galleries[0], ctx.author())).await?;
+            suppress_source_if_url(&ctx).await;
             Ok(())
         } else {
             let mut body = String::with_capacity(galleries.len() * 80);
@@ -107,7 +107,21 @@ impl Command for EhentaiCommand {
             if let Some(user) = ctx.author() {
                 embed = embed.author_user(user);
             }
-            ctx.reply_embed(&embed).await
+            ctx.reply_embed(&embed).await?;
+            suppress_source_if_url(&ctx).await;
+            Ok(())
+        }
+    }
+}
+
+/// Strip the source message's auto-embed when the invocation was a
+/// prefix command and the original content contained a URL. The
+/// multi-result list case calls this too — pasting several
+/// `e-hentai.org/g/...` URLs is the typical heavy-suppression scenario.
+async fn suppress_source_if_url(ctx: &CommandContext) {
+    if let InvocationSource::Prefix { msg, .. } = &ctx.source {
+        if message_only_links_to(&msg.content, &["e-hentai.org", "exhentai.org"]) {
+            suppress_embeds(&ctx.bot, msg.channel_id, msg.id).await;
         }
     }
 }

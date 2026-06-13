@@ -129,13 +129,15 @@ pub fn format_at(target_unix: i64, fmt: &str) -> String {
     let Some(local) = cfg.timezone.timestamp_opt(target_unix, 0).single() else {
         return String::new();
     };
+    // `safe_strftime` swallows the panic an invalid specifier (e.g. `%Q`,
+    // `%#z`) would otherwise raise in `to_string()` — see its docs.
     if slept_at(target_unix) {
-        return local.format(fmt).to_string();
+        return crate::engine::safe_strftime(local.format(fmt));
     }
     // Awake — shift the rendering back one day, hour += 24.
     let shifted = local - chrono::Duration::days(1);
     let shifted_hour = shifted.hour() + 24;
-    let rest = shifted.format(strip_hour(fmt).as_str()).to_string();
+    let rest = crate::engine::safe_strftime(shifted.format(strip_hour(fmt).as_str()));
     format!("{shifted_hour:02}:{rest}")
 }
 

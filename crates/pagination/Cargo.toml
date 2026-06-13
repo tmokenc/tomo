@@ -17,4 +17,3 @@ twilight-model = { workspace = true }
 twilight-http  = { workspace = true }
 twilight-standby = { workspace = true }
 twilight-util  = { workspace = true }
-futures        = { workspace = true }
