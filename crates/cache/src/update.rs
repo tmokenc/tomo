@@ -163,6 +163,14 @@ fn on_thread_delete(
 
 // ---------------- Guilds ----------------
 
+/// Ids present in the `cached` set but absent from the authoritative
+/// `present` set — i.e. the resources to evict when reconciling a
+/// `GUILD_CREATE`. These are things deleted while the bot was offline, for
+/// which no delete event ever fired.
+fn to_evict<T: Copy + Eq + std::hash::Hash>(cached: &HashSet<T>, present: &HashSet<T>) -> Vec<T> {
+    cached.difference(present).copied().collect()
+}
+
 fn on_guild_create(
     cache: &PersistentCache,
     payload: &twilight_model::gateway::payload::incoming::GuildCreate,
@@ -201,6 +209,32 @@ fn on_guild_create(
             }
             channels.insert(t.id);
         }
+        // Reconcile: evict channels we still have cached for this guild that
+        // aren't in this authoritative payload — they were deleted while the
+        // bot was offline (no CHANNEL_DELETE fired), so without this they'd
+        // linger in memory and on disk (and rehydrate) forever.
+        let stale = match cache.guild_channels.get(&guild.id) {
+            Some(old) => to_evict(&old, &channels),
+            None => Vec::new(),
+        };
+        for id in stale {
+            // Skip threads: GUILD_CREATE.threads lists only *active* threads,
+            // so a cached thread missing from it may simply be archived (still
+            // exists), not deleted. Regular channels are listed in full, so a
+            // missing one was definitely deleted. Offline thread deletions are
+            // left to THREAD_DELETE when next online.
+            let is_thread = cache
+                .channels
+                .get(&id)
+                .map(|c| c.kind.is_thread())
+                .unwrap_or(false);
+            if is_thread {
+                continue;
+            }
+            cache.channels.remove(&id);
+            cache.enqueue(WriteOp::DeleteChannel(id));
+            purge_channel_messages(cache, id);
+        }
         cache.guild_channels.insert(guild.id, channels);
     }
 
@@ -215,6 +249,18 @@ fn on_guild_create(
                 cache.enqueue(WriteOp::PutRole(role.id, v));
             }
             role_ids.insert(role.id);
+        }
+        // Reconcile roles deleted while offline (GUILD_CREATE sends the full
+        // role list). Members are deliberately NOT reconciled here: for large
+        // guilds the payload's member list is partial, so diffing against it
+        // would wrongly evict members who are simply absent from this chunk.
+        let stale = match cache.guild_roles.get(&guild.id) {
+            Some(old) => to_evict(&old, &role_ids),
+            None => Vec::new(),
+        };
+        for id in stale {
+            cache.roles.remove(&id);
+            cache.enqueue(WriteOp::DeleteRole(id));
         }
         cache.guild_roles.insert(guild.id, role_ids);
     }
@@ -590,3 +636,26 @@ fn on_voice_state(cache: &PersistentCache, vs: &twilight_model::voice::VoiceStat
 // manipulation above.
 #[allow(unused_imports)]
 use VecDeque as _;
+
+#[cfg(test)]
+mod tests {
+    use super::to_evict;
+    use std::collections::HashSet;
+
+    #[test]
+    fn to_evict_returns_only_stale_ids() {
+        let cached: HashSet<u64> = [1, 2, 3, 4].into_iter().collect();
+        let present: HashSet<u64> = [2, 4, 5].into_iter().collect();
+        let mut stale = to_evict(&cached, &present);
+        stale.sort_unstable();
+        // 1 and 3 were cached but are gone from the payload → evict; 5 is new.
+        assert_eq!(stale, vec![1, 3]);
+    }
+
+    #[test]
+    fn to_evict_empty_when_nothing_removed() {
+        let cached: HashSet<u64> = [1, 2].into_iter().collect();
+        let present: HashSet<u64> = [1, 2, 3].into_iter().collect();
+        assert!(to_evict(&cached, &present).is_empty());
+    }
+}
